@@ -511,8 +511,14 @@ class AlignPanel(QWidget):
 
     def _merged(self, payload):
         path, n, partial, notes, include = payload
-        self.doc.project.record_export(path, n, notes)
-        self.doc.touch("exports")
+        doc = self.doc
+        doc.project.record_export(path, n, notes)
+        doc.export_samples.pop(os.path.abspath(path), None)  # the file is new
+        # Show the result instead of the scans it was made from.
+        for s in doc.scans:
+            s.entry.visible = False
+        doc.touch("exports")
+        doc.touch("visibility")
         msg = f"Saved {n:,} points to {path}"
         left_out = len(include) - sum(include)
         if left_out:
@@ -525,8 +531,10 @@ class AlignPanel(QWidget):
         msg += ("\n\nThe list of scans in it is saved next to it as "
                 f"{os.path.basename(path)}.json, so scans already in it are skipped if "
                 "you add new scans to it later.")
-        self.status.emit(f"Saved {n:,} points to {os.path.basename(path)}.")
+        msg += ("\n\nThe merged cloud is now listed under Merged clouds and shown in the "
+                "view; the scans are hidden. Tick or untick any of them to compare.")
         QMessageBox.information(self, "PCD Merge", msg)
+        self.win.show_export(os.path.abspath(path), True)
 
     def save_transforms(self):
         doc = self.doc

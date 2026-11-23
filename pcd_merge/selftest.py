@@ -82,6 +82,19 @@ def run(log_path: str | None = None) -> int:
         e57.close()
         log(f"export ok: {', '.join(FORMATS)}")
 
+        from .project import Project
+        from .readers import read_cloud
+
+        for ext in FORMATS:
+            back = read_cloud(os.path.join(tmp, "merged" + ext))
+            assert len(back) == len(merged), (ext, len(back))
+        log(f"read back ok: {', '.join(FORMATS)}")
+        proj = Project.create(os.path.join(tmp, "Self-test"))
+        proj.add(read_cloud(os.path.join(tmp, "merged.pcd")))
+        proj.save()
+        assert len(Project.open(proj.folder).scans) == 1
+        log("project ok")
+
         from PySide6.QtWidgets import QApplication
 
         from .gui import HAVE_GL, MainWindow

@@ -410,12 +410,40 @@ class Project:
         """Whether the stored alignment was made for exactly these scans."""
         return bool(self.alignment) and self.alignment.get("keys") == [s.key for s in self.scans]
 
-    def record_export(self, path: str, points: int, notes=None) -> None:
-        self.exports.append({"path": os.path.abspath(path), "format": os.path.splitext(path)[1],
-                             "points": int(points), "time": _now(),
-                             "scans": [s.key for s in self.scans]})
+    def record_export(self, path: str, points: int, notes=None, visible: bool = False) -> dict:
+        """Remember an exported cloud (it is listed in the project and can be
+        shown in the view). Exporting to the same file again replaces the entry."""
+        path = os.path.abspath(path)
+        self.exports = [e for e in self.exports
+                        if os.path.normcase(e.get("path", "")) != os.path.normcase(path)]
+        entry = {"path": path, "format": os.path.splitext(path)[1], "points": int(points),
+                 "time": _now(), "scans": [s.key for s in self.scans], "visible": visible}
+        if os.path.isfile(path):
+            entry["hash"] = quick_hash(path)
         if notes:
-            self.exports[-1]["notes"] = list(notes)
+            entry["notes"] = list(notes)
+        self.exports.append(entry)
+        return entry
+
+    def remove_export(self, path: str) -> None:
+        self.exports = [e for e in self.exports
+                        if os.path.normcase(e.get("path", "")) != os.path.normcase(path)]
+
+    def save_export_preview(self, export: dict, xyz: np.ndarray) -> None:
+        if not self.folder or not export.get("hash"):
+            return
+        path = os.path.join(self.cache_dir, f"export-{export['hash']}.npy")
+        np.save(path + ".part.npy", np.asarray(xyz, dtype=np.float64))
+        os.replace(path + ".part.npy", path)
+
+    def load_export_preview(self, export: dict) -> np.ndarray | None:
+        if not self.folder or not export.get("hash"):
+            return None
+        try:
+            xyz = np.load(os.path.join(self.cache_dir, f"export-{export['hash']}.npy"))
+        except (OSError, ValueError):
+            return None
+        return xyz if xyz.ndim == 2 and xyz.shape[1] == 3 else None
 
     # ---- cache
 

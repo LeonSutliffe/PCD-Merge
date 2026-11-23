@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, 
                                QWidget)
 
 from ..quality import CHANGED, NO_OVERLAP, error_colours, fmt_distance
-from .common import HINT_STYLE, REMOVED_COLOUR, cloud_colour, legend_pixmap
+from .common import EXPORT_COLOUR, HINT_STYLE, REMOVED_COLOUR, cloud_colour, legend_pixmap
 
 try:
     import pyqtgraph.opengl as gl
@@ -222,6 +222,8 @@ class View3D(QWidget):
                 if not self.removed_hidden:
                     self._add_points(gone, REMOVED_COLOUR, size + 1)
             self._add_points(pts, color, size)
+        for xyz in doc.visible_exports():
+            self._add_points((xyz - origin).astype(np.float32), (*EXPORT_COLOUR, 1.0), size)
 
     def _add_points(self, pts, color, size):
         if not len(pts):
@@ -232,7 +234,7 @@ class View3D(QWidget):
         self._items.append(sc)
 
     def _extent(self):
-        previews = [p for p in self.doc.previews() if len(p)]
+        previews = [p for p in self.doc.previews() if len(p)] + self.doc.visible_exports()
         if not previews:
             return None
         allp = np.concatenate(previews) - self.doc.origin()

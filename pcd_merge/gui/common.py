@@ -13,6 +13,7 @@ PALETTE = [
     (0.95, 0.35, 0.25), (0.25, 0.65, 0.95), (0.35, 0.85, 0.35), (0.95, 0.80, 0.20),
     (0.75, 0.40, 0.90), (0.20, 0.85, 0.80), (0.95, 0.55, 0.75), (0.65, 0.65, 0.65),
 ]
+EXPORT_COLOUR = (0.92, 0.92, 0.88)  # merged clouds in the view: off-white
 GRADE_COLOURS = {"Good": "#2e9e44", "Fair": "#d08a00", "Poor": "#d0342c"}
 HINT_STYLE = "color: #888;"
 
@@ -42,3 +43,9 @@ def legend_pixmap(width=160, height=12) -> QPixmap:
 def fmt_secs(secs: float) -> str:
     secs = int(round(secs))
     return f"{secs // 60}:{secs % 60:02d}" if secs >= 60 else f"{secs} s"
+
+
+def export_icon(size: int = 14) -> QIcon:
+    pm = QPixmap(size, size)
+    pm.fill(QColor.fromRgbF(*EXPORT_COLOUR))
+    return QIcon(pm)

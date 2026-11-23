@@ -10,6 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("pytestqt")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt  # noqa: E402
+
 from pcd_merge.exporters import write_cloud  # noqa: E402
 from pcd_merge.readers import read_cloud  # noqa: E402
 from pcd_merge.synthetic import make_scan, make_scene, make_transform  # noqa: E402
@@ -103,6 +105,19 @@ def test_align_save_reopen_and_merge(window, qtbot, scans, tmp_path, monkeypatch
     n = sum(len(read_cloud(p)) for p in scans)
     assert len(read_cloud(out)) == n
     assert doc.project.exports[-1]["points"] == n
+    # The merged cloud is listed, shown instead of the scans, and can be hidden.
+    _wait(qtbot, other)
+    ex = doc.project.exports[-1]
+    assert ex["visible"] and len(doc.visible_exports()) == 1
+    assert not any(s.entry.visible for s in doc.scans)
+    item = other.project_panel.g_exports.child(0)
+    assert "merged.ply" in item.text(0)
+    item.setCheckState(0, Qt.Unchecked)
+    assert not ex["visible"] and doc.visible_exports() == []
+    item = other.project_panel.g_exports.child(0)
+    item.setCheckState(0, Qt.Checked)
+    assert len(doc.visible_exports()) == 1  # from memory / the cache, no re-read
+    assert not other.tasks.busy
 
     # Align again after reopening loads the clouds first.
     other.align_panel.start_align()
@@ -132,3 +147,18 @@ def test_missing_scan_is_flagged_and_relocated(window, qtbot, scans, tmp_path, m
                         lambda *a, **k: (str(moved / os.path.basename(scans[0])), ""))
     other._locate(0)
     assert other.doc.project.check_scans() == []  # the neighbour was found too
+
+
+def test_close_project_saves_and_empties_the_window(window, qtbot, scans, tmp_path):
+    win = window()
+    win.load_paths(scans)
+    _wait(qtbot, win)
+    win.doc.save_as(str(tmp_path / "Site"))
+    folder = win.doc.project.folder
+    win.doc.set_visible(0, False)
+    win.close_project()
+    assert win.doc.scans == [] and not win.doc.project.saved
+    assert "Untitled" in win.windowTitle()
+    from pcd_merge.project import Project
+
+    assert Project.open(folder).scans[0].visible is False  # saved on close
