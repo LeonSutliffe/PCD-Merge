@@ -80,7 +80,8 @@ time.sleep(1)
 updater.clean_leftovers()
 left = [n for n in os.listdir(updater.install_root()) if n.startswith("app-")]
 print("left in install folder after clean-up:", left)
-assert left == ["app"], "leftovers were not cleaned up once released"
+assert left == [], "leftovers were not cleaned up once released"
+assert os.path.isfile(exe), "the installed program went missing during clean-up"
 
 assert updater.create_shortcuts(), "creating shortcuts failed"
 desktop = subprocess.run(
