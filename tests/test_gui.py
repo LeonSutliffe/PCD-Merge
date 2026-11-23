@@ -312,6 +312,15 @@ def test_walk_through_opens_reports_and_falls_back(window, qtbot, scans, tmp_pat
     win.walk_through()
     _wait(qtbot, win)
     assert win.view.walking
+    # the changing help and point-count texts never make the window wider
+    walk = win.view._walk
+    win.show()
+    qtbot.waitExposed(win)
+    width = win.width()
+    walk.help.setText("W A S D: move " * 40)
+    walk.info.setText("123.4 M of 567.8 M points drawn   60 fps " * 5)
+    qtbot.wait(50)
+    assert win.width() == width and walk.minimumSizeHint().width() < 700
     win.view.leave_walk()
     assert not win.view.walking
 
