@@ -37,6 +37,8 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
+from .edits import EditStack
+
 FORMAT_VERSION = 1
 SUFFIX = ".pcdproj"
 PROJECT_FILE = "project.json"
@@ -172,6 +174,8 @@ class Project:
     alignment: dict | None = None  # see alignment_to_dict()
     quality: dict | None = None  # QualityReport.to_dict() plus the report text
     exports: list = field(default_factory=list)  # {"path", "format", "points", "time"}
+    # Edit mode: deletions and parts, as regions in the project frame
+    edits: EditStack = field(default_factory=EditStack)
     notes: str = ""
     created: str = field(default_factory=_now)
     modified: str = field(default_factory=_now)
@@ -287,6 +291,7 @@ class Project:
             "alignment": self.alignment,
             "quality": self.quality,
             "exports": self.exports,
+            "edits": self.edits.to_dict(),
             "notes": self.notes,
         }
 
@@ -309,7 +314,12 @@ class Project:
                 if os.path.isfile(cand):
                     entry.path = cand
             scans.append(entry)
+        try:
+            edits = EditStack.from_dict(data.get("edits"))
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProjectError(f"The project's edits could not be read ({e})") from e
         return cls(folder=folder, scans=scans, settings=dict(data.get("settings") or {}),
+                   edits=edits,
                    alignment=data.get("alignment"), quality=data.get("quality"),
                    exports=list(data.get("exports") or []), notes=data.get("notes", ""),
                    created=data.get("created", _now()), modified=data.get("modified", _now()))

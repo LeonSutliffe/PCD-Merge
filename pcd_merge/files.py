@@ -97,7 +97,7 @@ def already_merged(manifest: list[dict], paths: list[str]) -> list[str]:
 def save_merged(clouds, transforms, path: str, include=None, add_source: bool = False,
                 compressed: bool = False, base_path: str | None = None,
                 voxel_size: float | None = None, min_spacing: float | None = None,
-                cleanup=None, progress=None):
+                cleanup=None, progress=None, edits=None, keys=None, part=None):
     """Merge the included clouds, write the cloud (format from the extension)
     and its manifest.
 
@@ -111,6 +111,9 @@ def save_merged(clouds, transforms, path: str, include=None, add_source: bool = 
     ``base_path`` is set when cloud 0 is an existing merged cloud being added
     to: its manifest (if any) is carried over and the new scans are appended.
     ``cleanup`` is an optional :class:`~pcd_merge.cleanup.CleanupOptions`.
+    ``edits`` (an :class:`~pcd_merge.edits.EditStack`), with each cloud's
+    project key in ``keys``, leaves out the points deleted in Edit mode;
+    ``part`` keeps only one part of a split site.
     Returns ``(number of points, partially-present fields, notes, cleanup stats)``.
     """
     from .exporters import format_of, write_chunks, write_cloud
@@ -124,13 +127,15 @@ def save_merged(clouds, transforms, path: str, include=None, add_source: bool = 
     keep = [k for k, inc in enumerate(include) if inc]
     sel = [clouds[k] for k in keep]
     tfs = [transforms[k] for k in keep]
+    sel_keys = [keys[k] for k in keep] if keys is not None else [None] * len(sel)
     streamed = (not (cleanup is not None and cleanup.any) and not min_spacing
                 and not (compressed and format_of(path) == ".pcd"))
     notes = []
     stats = None
     if streamed:
         sources = [MemorySource(c) if isinstance(c, PointCloud) else c for c in sel]
-        merge = StreamedMerge(sources, tfs, add_source_field=add_source)
+        merge = StreamedMerge(sources, tfs, add_source_field=add_source, edits=edits,
+                              keys=sel_keys, part=part)
         partial, numbered, ids = merge.missing, merge.numbered, list(merge.ids)
         msg = f"Merging and writing {merge.total:,} points to {os.path.basename(path)}"
         progress(msg, 0.0)
@@ -140,6 +145,11 @@ def save_merged(clouds, transforms, path: str, include=None, add_source: bool = 
         n_points = sum(counts)
     else:
         sel = [c if isinstance(c, PointCloud) else c.read() for c in sel]
+        if edits or part is not None:
+            from .edits import filter_clouds
+
+            progress("Leaving out deleted points", 0.0)
+            sel = filter_clouds(sel, tfs, edits, sel_keys, part)
         merged, partial, stats = merge_clouds_with_stats(
             sel, tfs, add_source_field=add_source, cleanup=cleanup,
             progress=lambda m, f: progress(m, 0.5 * f))

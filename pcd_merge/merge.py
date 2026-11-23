@@ -265,9 +265,15 @@ class StreamedMerge:
     the merged layout. ``written[k]`` counts the points scan ``k`` gave in
     the last full pass (finite points only). Iterate as often as needed:
     every pass reads the scans again.
+
+    ``edits`` (an :class:`~pcd_merge.edits.EditStack`) leaves out the points
+    deleted in Edit mode, tested in the project frame, chunk by chunk;
+    ``keys`` are the scans' project keys (edits can be limited to some
+    scans). ``part`` keeps only the points of one part of a split site.
     """
 
-    def __init__(self, sources, transforms, add_source_field: bool = False):
+    def __init__(self, sources, transforms, add_source_field: bool = False,
+                 edits=None, keys=None, part=None):
         if len(sources) != len(transforms):
             raise ValueError("one transform per cloud is required")
         self.sources = list(sources)
@@ -283,6 +289,9 @@ class StreamedMerge:
         self.ids = stream_source_ids(self.sources) if self.numbered else [None] * len(self.sources)
         self.total = sum(s.count for s in self.sources)  # upper bound (before dropping NaNs)
         self.written = [0] * len(self.sources)
+        self.edits = edits if (edits or part is not None) else None
+        self.part = part
+        self.keys = list(keys) if keys is not None else [None] * len(self.sources)
 
     def __iter__(self):
         self.written = [0] * len(self.sources)
@@ -291,6 +300,13 @@ class StreamedMerge:
                 ok = np.isfinite(src["x"]) & np.isfinite(src["y"]) & np.isfinite(src["z"])
                 if not ok.all():
                     src = src[ok]
+                if self.edits is not None or self.part is not None:
+                    from .edits import EditStack, project_xyz
+
+                    stack = self.edits or EditStack()
+                    keep = stack.keep(project_xyz(src, t), self.keys[k], self.part)
+                    if not keep.all():
+                        src = src[keep]
                 out = np.zeros(len(src), dtype=self.dtype)
                 _copy_transformed(src, out, slice(0, len(src)), t, self.dtype)
                 if self.numbered and self.ids[k] is not None:

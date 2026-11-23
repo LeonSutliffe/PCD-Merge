@@ -1,9 +1,5 @@
-"""Right-hand panels of the Edit and Inspect modes.
-
-Placeholders in 0.9: they say what is coming, so the layout and the mode
-tabs are in place for 0.10 (Edit) and 0.11 (Inspect) to fill in, each in its
-own module, without touching the rest of the window.
-"""
+"""The Inspect mode's right-hand panel: a placeholder until 0.11 fills it
+in (Edit mode has its own module, :mod:`.edit_panel`)."""
 
 from __future__ import annotations
 
@@ -32,20 +28,6 @@ class _Placeholder(QWidget):
 
     def update_buttons(self, busy: bool):
         pass
-
-
-class EditPanel(_Placeholder):
-    TITLE = "Edit"
-    TEXT = ("Clean the scans up and check them: coming in <b>0.10</b>.<ul>"
-            "<li>Select by click, brush, grow-to-object, lasso, rectangle or box, in orbit or "
-            "walk-through</li>"
-            "<li>Delete and restore (every full-resolution point inside the selection), "
-            "undo / redo</li>"
-            "<li>Split along a line or plane into parts</li>"
-            "<li>Automatic clean-up (duplicates, noise, moving objects) moves here</li>"
-            "<li>Colour by alignment error, intensity, RGB or height</li></ul>"
-            "For now the 3D view, its top/front/side views and the walk-through work here "
-            "as in Align.")
 
 
 class InspectPanel(_Placeholder):
