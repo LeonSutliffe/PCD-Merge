@@ -117,6 +117,37 @@ closer than that. Original points are kept, not averaged, so intensity and the
 other fields stay exactly as measured. The default, *Full resolution*, saves
 every point.
 
+### Walk-through (first person)
+
+Press **Walk through…** above the 3D view to open the scan in a first-person
+window and walk or fly around inside it. It shows what the 3D view shows: the
+aligned clouds after **Align** (or their original positions), and only the
+files that are ticked. To walk through a merged file you saved earlier, load
+just that file and press **Walk through…**.
+
+| | |
+|---|---|
+| W A S D or arrow keys | move (level, like walking) |
+| Mouse | look around: click into the view first (Esc gives the mouse back), or drag |
+| Space / E, C / Q | up, down |
+| Shift, Ctrl | 4x faster, 4x slower while held |
+| Mouse wheel | change the walking speed |
+| 1 to 9 | jump to where scan 1 to 9 was taken |
+| Home | back to the start |
+
+The walk starts where the first scan was taken (from its PCD `VIEWPOINT`), so
+you begin inside the building at tripod height. **Fly where I look** makes W
+move in the direction you are looking instead of level. **Colour** offers the
+scan's RGB colours if it has them, intensity, height, or one colour per scan.
+
+Large scans stay smooth because not every point is drawn every frame. Up to
+16 million points are kept on the graphics card, sorted into small cubes.
+Nearby cubes are drawn in full; further away fewer points are drawn, and drawn
+larger, so they still look solid. Cubes behind you are skipped. While you move,
+the number of points drawn is lowered automatically if the frame rate drops,
+and the full detail comes back as soon as you stop. **Detail** sets how many
+points it aims for; lower it on a slower graphics card.
+
 ### Output formats
 
 | Format | Opens in | What is kept |
@@ -214,8 +245,7 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned: GPU acceleration for very large scans (NVIDIA), and a first-person
-  walk-through view for building-sized scans.
+* Planned: GPU acceleration for very large scans (NVIDIA).
 * Planned: a manual fallback where you pick a few matching points in two clouds
   to give the alignment a start.
 
