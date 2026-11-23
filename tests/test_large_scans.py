@@ -82,7 +82,8 @@ def test_streamed_merge_matches_transform_cloud(monkeypatch):
     ta, tb = make_transform(0.4, 0.02, (1, 2, 3)), make_transform(-1.0, 0.0, (5, -1, 0))
     steps = []
     out, missing = merge_clouds([PointCloud(a), PointCloud(b)], [ta, tb],
-                                add_source_field=True, progress=steps.append)
+                                add_source_field=True,
+                                progress=lambda _m, f: steps.append(f))
     expect = np.concatenate([transform_cloud(PointCloud(a), ta), transform_cloud(PointCloud(b), tb)])
     assert missing == [] and len(out) == len(expect) == 16_999
     for name in expect.dtype.names:

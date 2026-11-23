@@ -36,8 +36,9 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .cleanup import CleanupOptions
 from .exporters import FORMATS, file_filter, write_cloud
-from .merge import merge_clouds
+from .merge import merge_clouds_with_stats
 from .pcd_io import PointCloud, read_pcd
 from .registration import AlignResult, AlignSettings, align
 from .thinning import thin
@@ -146,12 +147,15 @@ def _align_clouds(clouds, settings, progress):
     return align([c.finite_xyz for c in clouds], settings, progress)
 
 
-def _merge_and_save(clouds, transforms, path, add_source, compressed, spacing, progress):
-    total = sum(len(c) for c in clouds)
-    msg = f"Applying transforms to {total:,} full-resolution points"
-    merged, partial = merge_clouds(clouds, transforms, add_source_field=add_source,
-                                   progress=lambda f: progress(msg, 0.5 * f))
-    notes = []
+def _merge_and_save(clouds, transforms, path, add_source, compressed, spacing, cleanup,
+                    progress):
+    def merge_progress(msg, frac):
+        progress(msg, 0.5 * frac)
+
+    merged, partial, stats = merge_clouds_with_stats(
+        clouds, transforms, add_source_field=add_source, cleanup=cleanup,
+        progress=merge_progress)
+    notes = stats.lines([c.name for c in clouds]) if stats is not None else []
     if spacing:
         progress(f"Thinning {len(merged):,} points to {spacing:g} spacing", 0.5)
         before = len(merged)
@@ -247,6 +251,41 @@ class MainWindow(QMainWindow):
         row.addWidget(self.b_retry)
         row.addWidget(self.b_merge, 1)
         lv.addLayout(row)
+
+        box = QGroupBox("Clean-up while merging (optional)")
+        cl = QVBoxLayout(box)
+        self.cb_dedup = QCheckBox("Remove duplicate points where scans overlap")
+        self.cb_dedup.setToolTip(
+            "Where two scans cover the same spot, keep only the points of the scan that "
+            "measured it most densely (usually the closest, most accurate one). Nothing is "
+            "averaged or moved, and areas seen by one scan are left alone.")
+        self.dedup_cell = QDoubleSpinBox()
+        self.dedup_cell.setDecimals(3)
+        self.dedup_cell.setRange(0.0, 10.0)
+        self.dedup_cell.setSingleStep(0.05)
+        self.dedup_cell.setSpecialValueText("Automatic")
+        self.dedup_cell.setToolTip(
+            "Size of the cubes in which one scan is chosen (scan units, usually metres). "
+            "Automatic is a few times the point spacing.")
+        self.dedup_cell.setEnabled(False)
+        self.cb_dedup.toggled.connect(self.dedup_cell.setEnabled)
+        drow = QHBoxLayout()
+        drow.addWidget(self.cb_dedup, 1)
+        drow.addWidget(QLabel("cell:"))
+        drow.addWidget(self.dedup_cell)
+        cl.addLayout(drow)
+        self.cb_denoise = QCheckBox("Remove isolated noise points (dust, rain, stray returns)")
+        self.cb_denoise.setToolTip(
+            "Drops points that are far from all of their neighbours compared with the rest "
+            "of the scan. Conservative: real surfaces are kept.")
+        cl.addWidget(self.cb_denoise)
+        self.cb_moving = QCheckBox("Remove moving objects (people, cars) seen in only one scan")
+        self.cb_moving.setToolTip(
+            "Drops points from one scan where another scan looked straight through that spot "
+            "and saw something further away. Objects hidden from the other scan are kept. "
+            "Works on scans saved in their scanner's own frame (raw scans).")
+        cl.addWidget(self.cb_moving)
+        lv.addWidget(box)
 
         self.cb_source = QCheckBox("Add a 'source' field (which file each point came from)")
         self.cb_compress = QCheckBox("Compress PCD output (binary_compressed)")
@@ -606,8 +645,15 @@ class MainWindow(QMainWindow):
                 compressed = False
         self._run(_merge_and_save,
                   (list(self.clouds), list(self.result.transforms), path,
-                   self.cb_source.isChecked(), compressed, self.spacing.value() or None),
+                   self.cb_source.isChecked(), compressed, self.spacing.value() or None,
+                   self._cleanup_options()),
                   self._merged, "Merging…")
+
+    def _cleanup_options(self) -> CleanupOptions:
+        return CleanupOptions(dedup=self.cb_dedup.isChecked(),
+                              dedup_cell=self.dedup_cell.value() or None,
+                              denoise=self.cb_denoise.isChecked(),
+                              remove_moving=self.cb_moving.isChecked())
 
     def _merged(self, payload):
         path, n, partial, notes = payload

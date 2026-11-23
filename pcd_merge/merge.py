@@ -64,9 +64,17 @@ def _merged_dtype(dtypes: list[np.dtype]) -> tuple[np.dtype, list[str]]:
     return np.dtype(fields), missing
 
 
+def sensor_origin(cloud: PointCloud, t: np.ndarray) -> np.ndarray:
+    """Where the scanner was, in the merged frame (from the PCD VIEWPOINT,
+    which is the scan origin for raw scans)."""
+    vp = np.asarray(cloud.viewpoint[:3], dtype=np.float64)
+    t = np.asarray(t, dtype=np.float64)
+    return t[:3, :3] @ vp + t[:3, 3]
+
+
 def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
-                 add_source_field: bool = False,
-                 progress=None) -> tuple[np.ndarray, list[str]]:
+                 add_source_field: bool = False, cleanup=None, progress=None,
+                 ) -> tuple[np.ndarray, list[str]]:
     """Transform every cloud and concatenate all of their points.
 
     Fields present in only some files are kept; points from files without that
@@ -74,15 +82,68 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
     partially-present fields so the caller can warn about them.
 
     ``add_source_field`` adds a ``source`` field (U2) holding the index of the
-    file each point came from. ``progress(fraction)`` is called as clouds are
-    processed.
+    file each point came from. ``progress(message, fraction)`` is called as
+    the work goes on.
 
-    Points are transformed in chunks straight into the output array, so the
-    only full-size allocation is the merged result itself.
+    Without clean-up, points are transformed in chunks straight into the
+    output array, so the only full-size allocation is the merged result.
+
+    ``cleanup`` is an optional :class:`~pcd_merge.cleanup.CleanupOptions`
+    (de-duplication, noise and moving-object removal); use
+    :func:`merge_clouds_with_stats` to also get how many points each step removed.
     """
+    out, missing, _ = merge_clouds_with_stats(clouds, transforms, add_source_field,
+                                              cleanup, progress)
+    return out, missing
+
+
+def merge_clouds_with_stats(clouds, transforms, add_source_field=False, cleanup=None,
+                            progress=None):
+    """Like :func:`merge_clouds`, plus a :class:`~pcd_merge.cleanup.CleanupStats`
+    (``None`` when no clean-up was asked for)."""
     if len(clouds) != len(transforms):
         raise ValueError("one transform per cloud is required")
-    report = progress or (lambda _f: None)
+    if cleanup is None or not cleanup.any:
+        out, missing = _stream_merge(clouds, transforms, add_source_field, progress)
+        return out, missing, None
+    if progress:
+        progress("Applying transforms to full-resolution clouds", 0.0)
+    parts = [transform_cloud(c, t) for c, t in zip(clouds, transforms)]
+    stats = None
+    if cleanup is not None and cleanup.any:
+        from .cleanup import clean
+
+        origins = [sensor_origin(c, t) for c, t in zip(clouds, transforms)]
+        parts, stats = clean(parts, origins, cleanup, progress)
+    out, missing = _concat(parts, add_source_field)
+    return out, missing, stats
+
+
+def _concat(parts: list[np.ndarray], add_source_field: bool) -> tuple[np.ndarray, list[str]]:
+    dtype, missing = _merged_dtype([p.dtype for p in parts])
+    if add_source_field:
+        if "source" in dtype.names:
+            raise ValueError("clouds already have a 'source' field")
+        dtype = np.dtype(dtype.descr + [("source", "<u2")])
+
+    total = sum(len(p) for p in parts)
+    out = np.zeros(total, dtype=dtype)
+    pos = 0
+    for k, p in enumerate(parts):
+        sl = slice(pos, pos + len(p))
+        for name in p.dtype.names:
+            if name in ("rgb", "rgba") and p.dtype[name] != dtype[name]:
+                out[name][sl] = p[name].view(dtype[name])
+            else:
+                out[name][sl] = p[name]
+        if add_source_field:
+            out["source"][sl] = k
+        pos += len(p)
+    return out, missing
+
+
+def _stream_merge(clouds, transforms, add_source_field, progress):
+    """Transform and join clouds chunk by chunk straight into the output."""
     dtype, missing = _merged_dtype([c.data.dtype for c in clouds])
     if add_source_field:
         if "source" in dtype.names:
@@ -92,8 +153,9 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
     masks = [c.finite_mask() for c in clouds]
     counts = [int(m.sum()) for m in masks]
     total = sum(counts)
+    msg = f"Applying transforms to {total:,} full-resolution points"
     out = np.zeros(total, dtype=dtype)
-    pos = done = 0
+    pos = 0
     for k, (c, t, m) in enumerate(zip(clouds, transforms, masks)):
         data = c.data
         all_ok = counts[k] == len(data)
@@ -106,9 +168,8 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
             if add_source_field:
                 out["source"][sl] = k
             pos += len(src)
-            done += len(src)
-            report(done / max(1, total))
-    report(1.0)
+            if progress:
+                progress(msg, pos / max(1, total))
     return out, missing
 
 
