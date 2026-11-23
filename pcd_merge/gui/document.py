@@ -352,6 +352,37 @@ class Document(QObject):
         st = self.project.edits
         return EditStack(list(st.point_edits), list(st.parts)) if (st or st.parts) else None
 
+    # ---- measurements
+
+    @property
+    def measurements(self):
+        return self.project.measurements
+
+    def measurement(self, mid: str):
+        return next((m for m in self.project.measurements if m.id == mid), None)
+
+    def add_measurement(self, m) -> None:
+        self.project.measurements.append(m)
+        self.touch("measurements")
+
+    def remove_measurement(self, mid: str) -> None:
+        before = len(self.project.measurements)
+        self.project.measurements = [m for m in self.project.measurements if m.id != mid]
+        if len(self.project.measurements) != before:
+            self.touch("measurements")
+
+    def rename_measurement(self, mid: str, name: str) -> None:
+        m = self.measurement(mid)
+        if m is not None and name.strip() != m.name and name.strip() != m.label():
+            m.name = name.strip()
+            self.touch("measurements")
+
+    def set_measurement_visible(self, mid: str, on: bool) -> None:
+        m = self.measurement(mid)
+        if m is not None and m.visible != on:
+            m.visible = on
+            self.touch("measurements")
+
     # ---- merged / exported clouds
 
     def export(self, path: str) -> dict | None:

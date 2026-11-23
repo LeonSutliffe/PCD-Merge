@@ -9,8 +9,8 @@ window. A tool bar along the top of the view changes with the app's mode.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel,
                                QPushButton, QRadioButton, QSlider, QStackedWidget, QVBoxLayout,
                                QWidget)
@@ -27,6 +27,8 @@ except Exception:  # pragma: no cover - depends on the machine's OpenGL
 
 SELECT_COLOUR = (1.0, 0.85, 0.1, 1.0)  # the Edit selection: yellow
 DELETED_COLOUR = (0.45, 0.12, 0.12, 1.0)  # deleted points, when shown: dark red
+MEASURE_COLOUR = (0.35, 0.86, 1.0, 1.0)  # measurements: light blue
+PENDING_COLOUR = (1.0, 0.55, 0.1, 1.0)  # the first point of a distance being measured
 
 # camera presets: name -> (elevation, azimuth) in degrees
 CAMERAS = {"Orbit": None, "Top": (90, -90), "Front": (0, -90), "Side": (0, 0)}
@@ -36,6 +38,7 @@ class View3D(QWidget):
     walk_requested = Signal()
     walk_fallback = Signal(str)  # the walk-through opened in its own window (the error)
     selection_changed = Signal()
+    measure_toggled = Signal(bool)  # the Measure button
 
     NAV_HINT = "Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom"
 
@@ -54,6 +57,9 @@ class View3D(QWidget):
         self.show_deleted = False  # draw deleted points (dark red) instead of hiding them
         self._sel_masks = {}  # scan index -> mask of its drawn points that are selected
         self._edit_cache = {}  # scan index -> (key, project-frame points, hidden mask)
+        self._meas_items = []  # what draws the measurements
+        self._pending = None  # first point of a distance being measured (project frame)
+        self._size_scale = 1  # point sizes are multiplied by this (large screenshots)
         self._redraw_soon = QTimer(self)
         self._redraw_soon.setSingleShot(True)
         self._redraw_soon.setInterval(40)
@@ -115,6 +121,14 @@ class View3D(QWidget):
         self.pt_size.setFixedWidth(70)
         self.pt_size.valueChanged.connect(self.redraw)
         top.addWidget(self.pt_size)
+        self.b_measure = QPushButton("Measure")
+        self.b_measure.setCheckable(True)
+        self.b_measure.setToolTip(
+            "Click two points for the distance between them (with the horizontal distance, "
+            "height difference and slope), or one point for its coordinates. Measurements "
+            "are saved in the project and listed on the left under Measurements. (M)")
+        self.b_measure.toggled.connect(self.measure_toggled)
+        top.addWidget(self.b_measure)
         b_fit = QPushButton("Reset view")
         b_fit.clicked.connect(self.fit)
         top.addWidget(b_fit)
@@ -201,6 +215,7 @@ class View3D(QWidget):
                 or (k == 4 and not have["rgb"]):
             self.colour_mode.setCurrentIndex(0)
         self.b_walk.setEnabled(not busy and bool(doc.scans) and HAVE_GL)
+        self.b_measure.setEnabled(bool(doc.scans) and HAVE_GL)
 
     def show_aligned(self, heat: bool | None = None):
         if self.doc.aligned:
@@ -236,7 +251,7 @@ class View3D(QWidget):
         self.legend.setVisible(heat)
         if q is not None:
             self.legend_hi.setText(fmt_distance(q.scale_max))
-        size = float(self.pt_size.value())
+        size = float(self.pt_size.value()) * self._size_scale
         mode = self.colour_mode.currentIndex()
         height = mode == 2 and self._height_range(aligned)
         attr = {3: "intensity", 4: "rgb"}.get(mode)
@@ -287,6 +302,94 @@ class View3D(QWidget):
             else:
                 color = (*EXPORT_COLOUR, 1.0)
             self._add_points((xyz - origin).astype(np.float32), color, size)
+        self.draw_measurements()
+
+    def measurements_shown(self) -> bool:
+        """Measurements are in the project frame: drawn where the scans are aligned."""
+        return self.aligned_shown() or not self.doc.aligned
+
+    def draw_measurements(self):
+        """(Re)draw the measurements and the pending point, not the clouds."""
+        if self.view is None:
+            return
+        for it in self._meas_items:
+            self.view.removeItem(it)
+        self._meas_items = []
+        if not self.measurements_shown():
+            return
+        origin = self.doc.origin()
+        for m in self.doc.measurements:
+            if not m.visible:
+                continue
+            pts = (np.asarray(m.points, float) - origin).astype(np.float32)
+            if m.kind == "distance":
+                line = gl.GLLinePlotItem(pos=pts, color=MEASURE_COLOUR, width=2.0 * self._size_scale,
+                                         antialias=True)
+                self._on_top(line)
+            self._on_top(gl.GLScatterPlotItem(pos=pts, color=MEASURE_COLOUR, size=9 * self._size_scale,
+                                              pxMode=True))
+            text = m.name or m.summary()
+            if m.name and m.kind == "distance":
+                text = f"{m.name}: {m.summary()}"
+            label = gl.GLTextItem(pos=pts.mean(axis=0), text="  " + text,
+                                  color=QColor(200, 240, 255), font=_label_font())
+            self._on_top(label)
+        if self._pending is not None:
+            p = (np.asarray(self._pending, float) - origin).astype(np.float32)[None]
+            self._on_top(gl.GLScatterPlotItem(pos=p, color=PENDING_COLOUR, size=11,
+                                              pxMode=True))
+
+    def _on_top(self, item):
+        """Add an item drawn over the points (no depth test), as measurements are."""
+        from OpenGL.GL import GL_DEPTH_TEST
+
+        item.setGLOptions("translucent")
+        item.updateGLOptions({GL_DEPTH_TEST: False})
+        item.setDepthValue(10)
+        self.view.addItem(item)
+        self._meas_items.append(item)
+
+    def screenshot(self, scale: int = 1):
+        """What the view shows as a QImage; ``scale`` > 1 draws it again that
+        many times larger (points too, so they look the same)."""
+        if self.view is None or not self.view.isValid():
+            return None  # no OpenGL context (nothing has been drawn)
+        if scale <= 1:
+            return self.view.grabFramebuffer()
+        from PySide6.QtGui import QImage
+
+        w, h = self.view.width() * scale, self.view.height() * scale
+        self._size_scale = scale
+        self.redraw()
+        texts = [it for it in self._meas_items if isinstance(it, gl.GLTextItem)]
+        for it in texts:  # drawn with a QPainter, which does not reach the off-screen image
+            it.setVisible(False)
+        try:
+            arr = self.view.renderToArray((w, h))
+        finally:
+            self._size_scale = 1
+            self.redraw()
+        img = QImage(arr.tobytes(), w, h, w * 4, QImage.Format_ARGB32)
+        img = img.convertToFormat(QImage.Format_RGB32)
+        # the labels, drawn on the image where they are in the view
+        mvp, origin = self.camera_mvp(), self.doc.origin()
+        p = QPainter(img)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        font = _label_font()
+        font.setPointSizeF(font.pointSizeF() * scale)
+        p.setFont(font)
+        for it in texts:
+            c = mvp @ np.r_[np.asarray(it.pos, float) + origin, 1.0]
+            if c[3] <= 1e-9:
+                continue
+            p.setPen(it.color)
+            p.drawText(QPointF((c[0] / c[3] + 1) / 2 * w, (1 - c[1] / c[3]) / 2 * h), it.text)
+        p.end()
+        return img
+
+    def set_pending_point(self, pt):
+        self._pending = None if pt is None else np.asarray(pt, float)
+        self.draw_measurements()
 
     def _intensity_range(self):
         """(low, high) intensity over what is shown, ignoring the odd outlier."""
@@ -349,7 +452,14 @@ class View3D(QWidget):
         if self.tool is not None:
             self.tool.cancel()
         self.tool = tool
+        self._pending = None
+        measuring = tool is not None and tool.name == "measure"
+        if self.b_measure.isChecked() != measuring:
+            self.b_measure.blockSignals(True)
+            self.b_measure.setChecked(measuring)
+            self.b_measure.blockSignals(False)
         if self.view is not None:
+            self.draw_measurements()
             self.view.setCursor(tool.cursor if tool is not None else Qt.ArrowCursor)
             self.overlay.update()
         self.hint.setText(tool.hint if tool is not None else self.NAV_HINT)
@@ -410,13 +520,16 @@ class View3D(QWidget):
         target = self.ndc(pos)
         half = np.array([self.view.width() / 2.0, self.view.height() / 2.0])
         best, best_w = None, np.inf
+        clouds = []
         for i, scan in enumerate(self.doc.scans):
             if not scan.entry.visible:
                 continue
             proj, hidden = self.project_points(i)
             if not len(proj):
                 continue
-            pts = proj if self.show_deleted else proj[~hidden]
+            clouds.append(proj if self.edit_mode and self.show_deleted else proj[~hidden])
+        clouds += [x for x in self.doc.visible_exports() if len(x)]  # already in the frame
+        for pts in clouds:
             clip = pts @ mvp[:3, :3].T + mvp[:3, 3]
             w = pts @ mvp[3, :3] + mvp[3, 3]
             front = w > 1e-9
@@ -601,6 +714,13 @@ def _attr_colours(attr: str, vals: np.ndarray, irange) -> np.ndarray:
         g = np.nan_to_num(g, nan=0.0) ** 0.8 * 0.92 + 0.08  # never quite black
         out[:, 0] = out[:, 1] = out[:, 2] = g
     return out
+
+
+def _label_font() -> QFont:
+    f = QFont()
+    f.setPointSizeF(10.5)
+    f.setBold(True)
+    return f
 
 
 def _swatch(rgb) -> QPixmap:

@@ -35,7 +35,7 @@ from ..readers import find_scan_files, input_filter
 from .align_panel import AlignPanel
 from .document import Document, load_clouds, load_files, sample_file, sample_missing
 from .edit_panel import EditPanel
-from .mode_panels import InspectPanel
+from .inspect_panel import InspectPanel
 from .project_panel import ProjectPanel
 from .view3d import HAVE_GL, View3D
 from .workers import TaskBar
@@ -58,7 +58,7 @@ class MainWindow(QMainWindow):
         self.view = View3D(self.doc)
         self.align_panel = AlignPanel(self)
         self.edit_panel = EditPanel(self)
-        self.inspect_panel = InspectPanel()
+        self.inspect_panel = InspectPanel(self)
         self.right = QStackedWidget()
         for p in (self.align_panel, self.edit_panel, self.inspect_panel):
             self.right.addWidget(p)
@@ -81,7 +81,8 @@ class MainWindow(QMainWindow):
                                     "and export.")
         self.modes.setTabToolTip(1, "Check and clean the scans: select points and delete or "
                                     "restore them.")
-        self.modes.setTabToolTip(2, "Read-only, full-quality viewing and measuring (0.11).")
+        self.modes.setTabToolTip(2, "Look at the site and measure it: distances, heights, "
+                                    "slopes and coordinates, and screenshots.")
         self.modes.setExpanding(False)
         self.modes.setStyleSheet("QTabBar::tab { padding: 4px 18px; font-weight: bold; }")
         self.modes.currentChanged.connect(self._mode_changed)
@@ -104,6 +105,7 @@ class MainWindow(QMainWindow):
         self.align_panel.status.connect(self.tasks.set_status)
         self.view.walk_requested.connect(self.walk_through)
         self.view.selection_changed.connect(self._update_buttons)
+        self.view.measure_toggled.connect(self._measure_toggled)
         self.view.walk_fallback.connect(lambda err: self.tasks.set_status(
             "The walk-through opened in a window of its own (it could not be drawn inside "
             f"this one: {err})."))
@@ -179,6 +181,9 @@ class MainWindow(QMainWindow):
             self._action(v, f"{name} view", lambda _=False, i=k: (
                 self.view.camera.setCurrentIndex(i), self.view._camera_preset()), f"Ctrl+{k}")
         self.a_walk = self._action(v, "Walk through", self.walk_through, "Ctrl+W")
+        self.a_measure = self._action(v, "Measure", lambda: self.view.b_measure.click(), "M",
+                                      "Click two points for a distance, or one for its "
+                                      "coordinates (in every mode).")
         v.addSeparator()
         for k, m in enumerate(MODES):
             self._action(v, f"{m} mode", lambda _=False, i=k: self.modes.setCurrentIndex(i),
@@ -213,8 +218,22 @@ class MainWindow(QMainWindow):
 
     def _mode_changed(self, i):
         self.right.setCurrentIndex(i)
+        self.inspect_panel.activate(False)
         self.edit_panel.activate(i == 1)
+        if i == 2:
+            self.inspect_panel.activate(True)
         self._update_buttons()
+
+    def _measure_toggled(self, on):
+        """The Measure button above the view: measuring works in every mode."""
+        if on:
+            if self.modes.currentIndex() == 1:
+                self.edit_panel.choose_tool(None)  # no selecting while measuring
+            self.inspect_panel.start_measuring()
+            if not self.inspect_panel.measuring():  # nothing to measure yet
+                self.view.b_measure.setChecked(False)
+        else:
+            self.view.set_tool(None)
 
     def save_part(self, part_id: str):
         part = self.doc.part(part_id)
@@ -230,6 +249,7 @@ class MainWindow(QMainWindow):
         self.project_panel.set_busy(busy)
         self.align_panel.update_buttons(busy)
         self.edit_panel.update_buttons(busy)
+        self.inspect_panel.update_buttons(busy)
         editing = self.modes.currentIndex() == 1
         st = self.doc.edits
         self.a_undo.setEnabled(editing and not busy and st.can_undo())
@@ -241,6 +261,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_add, self.a_folder):
             a.setEnabled(not busy)
         self.a_walk.setEnabled(not busy and bool(self.doc.scans) and HAVE_GL)
+        self.a_measure.setEnabled(bool(self.doc.scans) and HAVE_GL)
         self.a_copy.setEnabled(not busy and self.doc.project.saved and bool(self.doc.scans))
         self.a_clear_cache.setEnabled(self.doc.project.saved)
         self.a_close.setEnabled(not busy and (self.doc.project.saved or bool(self.doc.scans)))
@@ -257,6 +278,9 @@ class MainWindow(QMainWindow):
             self.edit_panel.refresh()
         elif what == "parts":
             self.edit_panel.refresh()
+        elif what == "measurements":
+            self.view.draw_measurements()
+            self.inspect_panel.refresh()
         elif what == "edits":
             self.edit_panel.edits_changed()
             self.align_panel.update_cleanup_summary()
@@ -267,6 +291,7 @@ class MainWindow(QMainWindow):
             self.edit_panel.clear_selection()
             self.edit_panel._height_set = False
             self.edit_panel.refresh()
+            self.inspect_panel.refresh()
             self.view.update_controls(self.tasks.busy)
             if self.doc.aligned:
                 self.view.show_aligned()

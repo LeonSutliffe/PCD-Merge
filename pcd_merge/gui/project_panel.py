@@ -1,7 +1,7 @@
 """Left side of the window: the project tree, the same in every mode.
 
 Scans (tick to show or hide), parts (splits made in Edit), measurements
-(0.11) and merged clouds.
+and merged clouds.
 """
 
 from __future__ import annotations
@@ -63,7 +63,9 @@ class ProjectPanel(QWidget):
         self.g_parts.setToolTip(0, "Pieces of the site (floors, wings) made by splitting in "
                                    "Edit mode. Tick to show; double-click to rename; "
                                    "right-click to save one on its own.")
-        self.g_meas.setToolTip(0, "Measurements made in Inspect mode (coming in 0.11).")
+        self.g_meas.setToolTip(0, "Distances and points measured with the Measure button "
+                                  "above the view. Tick to show; double-click to rename; "
+                                  "right-click to delete.")
         self.g_exports.setToolTip(0, "Clouds merged or exported from this project. Tick one "
                                      "to show it in the 3D view.")
 
@@ -143,7 +145,19 @@ class ProjectPanel(QWidget):
         self.g_parts.setText(0, f"Parts ({len(parts)})" if parts else "Parts")
         self.g_parts.setDisabled(not parts)
         self.g_parts.setExpanded(True)
-        self.g_meas.setDisabled(True)
+        self.g_meas.takeChildren()
+        meas = doc.measurements
+        for m in meas:
+            it = QTreeWidgetItem([m.label()])
+            it.setData(0, ROLE_INDEX, m.id)
+            it.setToolTip(0, "\n".join(m.details()))
+            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+                        | Qt.ItemIsEditable)
+            it.setCheckState(0, Qt.Checked if m.visible else Qt.Unchecked)
+            self.g_meas.addChild(it)
+        self.g_meas.setText(0, f"Measurements ({len(meas)})" if meas else "Measurements")
+        self.g_meas.setDisabled(not meas)
+        self.g_meas.setExpanded(True)
         self.g_scans.setExpanded(expanded)
         self.g_exports.setExpanded(True)
         self.tree.blockSignals(False)
@@ -179,6 +193,14 @@ class ProjectPanel(QWidget):
             if item.text(0).strip() and item.text(0) != part.name:
                 self.doc.rename_part(pid, item.text(0))
             self.doc.set_part_visible(pid, item.checkState(0) == Qt.Checked)
+        elif item.parent() is self.g_meas:
+            mid = item.data(0, ROLE_INDEX)
+            m = self.doc.measurement(mid)
+            if m is None:
+                return
+            if item.text(0).strip() and item.text(0).strip() != m.label():
+                self.doc.rename_measurement(mid, item.text(0))
+            self.doc.set_measurement_visible(mid, item.checkState(0) == Qt.Checked)
 
     def selected_part(self) -> str | None:
         for it in self.tree.selectedItems():
@@ -209,6 +231,17 @@ class ProjectPanel(QWidget):
             m.addAction(a)
             a = QAction("Rename", m)
             a.triggered.connect(lambda: self.tree.editItem(item, 0))
+            m.addAction(a)
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
+        if item is not None and item.parent() is self.g_meas:
+            mid = item.data(0, ROLE_INDEX)
+            m = QMenu(self)
+            a = QAction("Rename", m)
+            a.triggered.connect(lambda: self.tree.editItem(item, 0))
+            m.addAction(a)
+            a = QAction("Delete", m)
+            a.triggered.connect(lambda: self.doc.remove_measurement(mid))
             m.addAction(a)
             m.exec(self.tree.viewport().mapToGlobal(pos))
             return

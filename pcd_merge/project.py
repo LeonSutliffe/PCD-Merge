@@ -38,6 +38,7 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 from .edits import EditStack
+from .measure import Measurement
 
 FORMAT_VERSION = 1
 SUFFIX = ".pcdproj"
@@ -176,6 +177,7 @@ class Project:
     exports: list = field(default_factory=list)  # {"path", "format", "points", "time"}
     # Edit mode: deletions and parts, as regions in the project frame
     edits: EditStack = field(default_factory=EditStack)
+    measurements: list = field(default_factory=list)  # measure.Measurement
     notes: str = ""
     created: str = field(default_factory=_now)
     modified: str = field(default_factory=_now)
@@ -292,6 +294,7 @@ class Project:
             "quality": self.quality,
             "exports": self.exports,
             "edits": self.edits.to_dict(),
+            "measurements": [m.to_dict() for m in self.measurements],
             "notes": self.notes,
         }
 
@@ -315,11 +318,15 @@ class Project:
                     entry.path = cand
             scans.append(entry)
         try:
+            measurements = [Measurement.from_dict(m) for m in data.get("measurements") or []]
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProjectError(f"The project's measurements could not be read ({e})") from e
+        try:
             edits = EditStack.from_dict(data.get("edits"))
         except (KeyError, TypeError, ValueError) as e:
             raise ProjectError(f"The project's edits could not be read ({e})") from e
         return cls(folder=folder, scans=scans, settings=dict(data.get("settings") or {}),
-                   edits=edits,
+                   edits=edits, measurements=measurements,
                    alignment=data.get("alignment"), quality=data.get("quality"),
                    exports=list(data.get("exports") or []), notes=data.get("notes", ""),
                    created=data.get("created", _now()), modified=data.get("modified", _now()))

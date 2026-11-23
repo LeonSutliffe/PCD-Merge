@@ -407,3 +407,101 @@ def test_colour_by_intensity_and_rgb(window, qtbot, scans, tmp_path):
     other.open_project(doc.project.folder)
     assert not other.tasks.busy
     assert np.array_equal(other.doc.scans[0].attrs["intensity"], scan.attrs["intensity"])
+
+
+def test_measure_in_every_mode_list_export_and_reopen(window, qtbot, scans, tmp_path):
+    import csv
+
+    from PySide6.QtCore import QPoint
+
+    from pcd_merge.gui.view3d import HAVE_GL
+
+    win = window()
+    win.resize(1200, 800)
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    doc, view, panel = win.doc, win.view, win.inspect_panel
+    if not HAVE_GL:
+        pytest.skip("no OpenGL")
+    win.show()
+    qtbot.waitExposed(win)
+
+    # the Measure button above the view works in Align mode too
+    assert view.b_measure.isEnabled()
+    view.b_measure.click()
+    assert view.tool is not None and view.tool.name == "measure" and view.b_measure.isChecked()
+    gv = view.view
+    proj, _ = view.project_points(0)
+    mvp = view.camera_mvp()
+
+    def screen(p):
+        c = mvp @ np.r_[p, 1.0]
+        return QPoint(int(round((c[0] / c[3] + 1) / 2 * gv.width())),
+                      int(round((1 - c[1] / c[3]) / 2 * gv.height())))
+
+    a, b = proj[10], proj[len(proj) // 2]
+    qtbot.mouseClick(gv, Qt.LeftButton, pos=screen(a))
+    assert view._pending is not None and not doc.measurements
+    qtbot.mouseClick(gv, Qt.LeftButton, pos=screen(b))
+    assert len(doc.measurements) == 1 and view._pending is None
+    m = doc.measurements[0]
+    assert m.kind == "distance"
+    assert m.length == pytest.approx(float(np.linalg.norm(m.b - m.a)))
+    assert "Measured: Distance" in win.tasks.status.text()
+    assert len(view._meas_items) == 3  # line, end points, label
+    assert win.project_panel.g_meas.childCount() == 1
+
+    # Inspect opens with measuring on; a point measurement
+    win.modes.setCurrentIndex(2)
+    assert win.right.currentWidget() is panel and panel.measuring()
+    panel.rb_point.setChecked(True)
+    qtbot.mouseClick(gv, Qt.LeftButton, pos=screen(b))
+    assert [x.kind for x in doc.measurements] == ["distance", "point"]
+    assert panel.list.count() == 2 and panel.current_id() == doc.measurements[1].id
+    assert panel.details.text().startswith("X ")
+
+    # rename and hide from the tree, delete from the panel
+    it = win.project_panel.g_meas.child(0)
+    it.setText(0, "Door width")
+    assert doc.measurements[0].name == "Door width"
+    it = win.project_panel.g_meas.child(0)
+    it.setCheckState(0, Qt.Unchecked)
+    assert not doc.measurements[0].visible
+    assert len(view._meas_items) == 2  # only the point: its marker and label
+
+    out = str(tmp_path / "m.csv")
+    panel.export_csv(out)
+    rows = list(csv.DictReader(open(out, encoding="utf-8")))
+    assert [r["name"] for r in rows][0] == "Door width" and rows[1]["kind"] == "point"
+
+    # a screenshot, as shown and twice as large (where OpenGL draws: not headless)
+    w, h = panel.save_screenshot(str(tmp_path / "shot.png"))
+    if gv.isValid():
+        assert (w, h) != (0, 0) and os.path.isfile(tmp_path / "shot.png")
+        w2, h2 = panel.save_screenshot(str(tmp_path / "big.png"), 2)
+        assert w2 == 2 * gv.width() and h2 == 2 * gv.height()
+    else:
+        assert (w, h) == (0, 0) and "could not be saved" in win.tasks.status.text()
+
+    # measurements are saved in the project
+    doc.save_as(str(tmp_path / "Measured"))
+    other = window()
+    other.open_project(doc.project.folder)
+    assert [x.name for x in other.doc.measurements] == ["Door width", ""]
+    assert other.inspect_panel.list.count() == 2
+
+    # in Edit mode Measure takes over from the selection tools, and back
+    win.modes.setCurrentIndex(1)
+    win.edit_panel.choose_tool("brush")
+    view.b_measure.click()
+    assert view.tool.name == "measure" and win.edit_panel.tool_buttons[None].isChecked()
+    win.edit_panel.choose_tool("lasso")
+    assert view.tool.name == "lasso" and not view.b_measure.isChecked()
+    win.modes.setCurrentIndex(2)
+
+    panel.list.setCurrentRow(1)
+    panel.delete_current()
+    assert len(doc.measurements) == 1
+    # leaving Inspect stops measuring
+    win.modes.setCurrentIndex(0)
+    assert view.tool is None and not view.b_measure.isChecked()
