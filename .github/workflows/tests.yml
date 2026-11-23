@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System libraries for Open3D
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libgomp1
+      - name: Install
+        run: pip install -e ".[test]"
+      - name: Run tests
+        run: pytest -q

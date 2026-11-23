@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcd-merge"
+version = "0.1.0"
+description = "Drag in LiDAR point clouds (PCD), align them automatically and merge them into one cloud."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.23",
+    "open3d>=0.17",
+    "PySide6>=6.5",
+    "pyqtgraph>=0.13",
+    "PyOpenGL>=3.1",
+]
+
+[project.optional-dependencies]
+# Fast reading/writing of binary_compressed PCD files. Without it a slower
+# pure-Python decoder is used for reading.
+fast = ["python-lzf>=0.2.4"]
+test = ["pytest>=7", "python-lzf>=0.2.4"]
+
+[project.scripts]
+pcd-merge = "pcd_merge.cli:main"
+
+[tool.setuptools]
+packages = ["pcd_merge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
