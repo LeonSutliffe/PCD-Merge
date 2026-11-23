@@ -218,7 +218,6 @@ Rules:
 | Prepared viewing file (COPC) with streaming full-quality view | Inspect | Full quality on building-sized scans, and clients can open it without the app. |
 | Click-to-measure in 3D (distance, height, coordinates), saved | Inspect | Leon's ask. |
 | Export the edited cloud (with spacing, format) | Align | Today's merge, now with the edits applied. |
-| Code signing (or a decision not to) | - | SmartScreen's "Run anyway" looks broken to new users. |
 
 ### Nice-to-have (1.0 if time allows, else 1.1)
 
@@ -269,7 +268,7 @@ Rules:
    clean-up moved here, colour by alignment error.
 3. **0.11: Inspect mode.** Prepared viewing file and streaming, measuring.
    Manual 3-point alignment in Align.
-4. **1.0.** Bug fixes from real scans, signed installer, README rewritten as a
+4. **1.0.** Bug fixes from real scans, an Uninstall option, README rewritten as a
    user guide, sample project. Nice-to-haves that are ready go in.
 
 Each step is a release Leon can try on real scans before the next starts.
@@ -309,7 +308,9 @@ install it without help.
 
 ## Code signing plan
 
-Free route: SignPath Foundation (no rule against AI-written code; the same
+**Decided (Leon, 2026-11-23): no signing for 1.0.** The README keeps the
+SmartScreen "More info > Run anyway" note. If signing is wanted later, the
+free route is SignPath Foundation (no rule against AI-written code; the same
 review and approval rules apply to every change). Apply around 1.0, once the
 project has some public history. Needed before applying:
 
