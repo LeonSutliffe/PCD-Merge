@@ -64,8 +64,17 @@ def _merged_dtype(dtypes: list[np.dtype]) -> tuple[np.dtype, list[str]]:
     return np.dtype(fields), missing
 
 
+def sensor_origin(cloud: PointCloud, t: np.ndarray) -> np.ndarray:
+    """Where the scanner was, in the merged frame (from the PCD VIEWPOINT,
+    which is the scan origin for raw scans)."""
+    vp = np.asarray(cloud.viewpoint[:3], dtype=np.float64)
+    t = np.asarray(t, dtype=np.float64)
+    return t[:3, :3] @ vp + t[:3, 3]
+
+
 def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
-                 add_source_field: bool = False) -> tuple[np.ndarray, list[str]]:
+                 add_source_field: bool = False, cleanup=None, progress=None,
+                 ) -> tuple[np.ndarray, list[str]]:
     """Transform every cloud and concatenate all of their points.
 
     Fields present in only some files are kept; points from files without that
@@ -74,10 +83,34 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
 
     ``add_source_field`` adds a ``source`` field (U2) holding the index of the
     file each point came from.
+
+    ``cleanup`` is an optional :class:`~pcd_merge.cleanup.CleanupOptions`
+    (de-duplication, noise and moving-object removal); use
+    :func:`merge_clouds_with_stats` to also get how many points each step removed.
     """
+    out, missing, _ = merge_clouds_with_stats(clouds, transforms, add_source_field,
+                                              cleanup, progress)
+    return out, missing
+
+
+def merge_clouds_with_stats(clouds, transforms, add_source_field=False, cleanup=None,
+                            progress=None):
+    """Like :func:`merge_clouds`, plus a :class:`~pcd_merge.cleanup.CleanupStats`
+    (``None`` when no clean-up was asked for)."""
     if len(clouds) != len(transforms):
         raise ValueError("one transform per cloud is required")
     parts = [transform_cloud(c, t) for c, t in zip(clouds, transforms)]
+    stats = None
+    if cleanup is not None and cleanup.any:
+        from .cleanup import clean
+
+        origins = [sensor_origin(c, t) for c, t in zip(clouds, transforms)]
+        parts, stats = clean(parts, origins, cleanup, progress)
+    out, missing = _concat(parts, add_source_field)
+    return out, missing, stats
+
+
+def _concat(parts: list[np.ndarray], add_source_field: bool) -> tuple[np.ndarray, list[str]]:
     dtype, missing = _merged_dtype([p.dtype for p in parts])
     if add_source_field:
         if "source" in dtype.names:

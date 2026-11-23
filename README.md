@@ -90,6 +90,31 @@ Voxel size is *Automatic* by default (about 40,000 points per thinned cloud).
 Set it by hand, in the scans' units, if alignment fails: larger is more robust
 and faster, smaller is more precise. It never affects which points are merged.
 
+### Clean-up while merging (optional)
+
+By default every original point goes into the merged file. Three optional
+steps, under *Clean-up while merging*, can tidy it up. They only ever **remove**
+points: nothing is resampled, averaged or moved, so the points that remain keep
+their exact coordinates and every field. The finished dialog says how many
+points each step removed from each file.
+
+* **Remove duplicate points where scans overlap.** Where two scans cover the
+  same spot you otherwise get two interleaved copies of every surface. Space is
+  split into small cubes (*cell*, automatic = a few times the point spacing); in
+  each cube that several scans reach, only the points of the scan that measured
+  it most densely are kept. That is usually the closest and most accurate scan,
+  so its full detail is kept. Areas only one scan saw are never touched.
+* **Remove isolated noise points.** Statistical outlier removal on each scan:
+  points far from all their neighbours (dust, rain, stray returns) are dropped.
+  Set conservatively, so real surfaces stay.
+* **Remove moving objects (people, cars) seen in only one scan.** A point from
+  one scan is dropped when another scan looked straight *through* that spot and
+  hit something further away, and has no point of its own there. Things that
+  were merely hidden from the other scan are kept. This needs each scan in its
+  scanner's own frame (normal for raw scans; the PCD `VIEWPOINT` is used as the
+  scanner position). A cloud that does not look like a single-position scan is
+  not used as evidence, and the report says so.
+
 ### Command line
 
 ```bash
@@ -98,7 +123,9 @@ pcd-merge scan1.pcd scan2.pcd scan3.pcd -o merged.pcd --transforms transforms.js
 
 Options: `--voxel 0.3`, `--seed 1` (repeatable runs), `--source-field` (adds a
 `source` field telling which file each point came from), `--compressed`, and
-`--force` (merge even if some cloud could not be aligned).
+`--force` (merge even if some cloud could not be aligned). Clean-up:
+`--dedup` (or `--dedup 0.1` to set the cell size), `--denoise`,
+`--remove-moving`.
 
 ## Limits and next steps
 
