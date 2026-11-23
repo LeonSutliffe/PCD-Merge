@@ -69,3 +69,111 @@ def test_swap_script(tmp_path, monkeypatch):
 def test_disabled_when_running_from_source():
     assert not updater.enabled()
     assert __version__
+
+
+# --------------------------------------------------------------------------
+# Download robustness: a local HTTP server that drops the connection part-way
+
+
+import hashlib
+import http.server
+import threading
+
+PAYLOAD_FILES = {updater.EXE_NAME: os.urandom(300_000), "_internal/a.dll": os.urandom(200_000)}
+
+
+def _payload(tmp_path):
+    zp = tmp_path / "src.zip"
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_STORED) as z:
+        for n, c in PAYLOAD_FILES.items():
+            z.writestr(n, c)
+    return zp.read_bytes()
+
+
+def _serve(data, cut_after=None, honour_range=True, max_cuts=1):
+    """Serve ``data``; the first ``max_cuts`` responses stop after ``cut_after`` bytes."""
+    state = {"cuts": 0, "requests": []}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            start = 0
+            rng = self.headers.get("Range")
+            state["requests"].append(rng)
+            if rng and honour_range:
+                start = int(rng.split("=")[1].split("-")[0])
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+            else:
+                self.send_response(200)
+            body = data[start:]
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if cut_after is not None and state["cuts"] < max_cuts:
+                state["cuts"] += 1
+                self.wfile.write(body[:cut_after])
+                self.wfile.flush()
+                self.close_connection = True
+                return
+            self.wfile.write(body)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_port}/r.zip", state
+
+
+def test_download_resumes_after_dropped_connection(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.time, "sleep", lambda s: None)
+    data = _payload(tmp_path)
+    srv, url, state = _serve(data, cut_after=100_000, max_cuts=2)
+    try:
+        dest = str(tmp_path / "out.zip")
+        updater.download(url, dest, expected_size=len(data),
+                         sha256=hashlib.sha256(data).hexdigest())
+    finally:
+        srv.shutdown()
+    assert open(dest, "rb").read() == data
+    assert state["requests"][1] == "bytes=100000-"  # resumed, not restarted
+
+
+def test_download_restarts_when_range_not_supported(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.time, "sleep", lambda s: None)
+    data = _payload(tmp_path)
+    srv, url, _ = _serve(data, cut_after=100_000, honour_range=False)
+    try:
+        dest = str(tmp_path / "out.zip")
+        updater.download(url, dest, expected_size=len(data))
+    finally:
+        srv.shutdown()
+    assert open(dest, "rb").read() == data
+
+
+def test_download_gives_clear_error_when_always_cut(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.time, "sleep", lambda s: None)
+    data = _payload(tmp_path)
+    srv, url, _ = _serve(data, cut_after=0, max_cuts=99)
+    try:
+        with pytest.raises(updater.DownloadError, match="stopped at"):
+            updater.download(url, str(tmp_path / "out.zip"), expected_size=len(data),
+                             attempts=3)
+    finally:
+        srv.shutdown()
+
+
+def test_download_checks_checksum(tmp_path, monkeypatch):
+    data = _payload(tmp_path)
+    srv, url, _ = _serve(data)
+    try:
+        with pytest.raises(updater.DownloadError, match="checksum"):
+            updater.download(url, str(tmp_path / "out.zip"), sha256="0" * 64)
+    finally:
+        srv.shutdown()
+
+
+def test_release_digest_is_read():
+    rel = updater.release_from_json({"tag_name": "v1.0.0", "assets": [{
+        "name": "PCD-Merge-1.0.0-windows-x64.zip", "browser_download_url": "u", "size": 5,
+        "digest": "sha256:" + "ab" * 32}]})
+    assert rel.sha256 == "ab" * 32
