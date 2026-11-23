@@ -59,7 +59,8 @@ class MainWindow(QMainWindow):
         self.right = QStackedWidget()
         for p in (self.align_panel, self.edit_panel, self.inspect_panel):
             self.right.addWidget(p)
-        self.right.setMinimumWidth(max(340, self.align_panel.body.minimumSizeHint().width() + 24))
+        # Narrow enough for small or scaled-up screens: the panel scrolls if it must.
+        self.right.setMinimumWidth(300)
 
         split = QSplitter()
         split.addWidget(self.project_panel)
@@ -527,6 +528,21 @@ def _key(cloud) -> str:
     return f"{p}#{cloud.extra['scan_index']}" if cloud.extra.get("scans_in_file", 1) > 1 else p
 
 
+def fit_to_screen(win) -> None:
+    """Start no bigger than the screen (with Windows display scaling a 1440 px
+    wide window can be wider than the screen, cutting off the right panel and
+    the progress bar)."""
+    screen = win.screen() or QApplication.primaryScreen()
+    if screen is None:
+        return
+    avail = screen.availableGeometry()
+    w = min(win.width(), avail.width())
+    h = min(win.height(), avail.height() - 40)  # room for the title bar
+    win.resize(max(w, win.minimumSizeHint().width()), max(h, 400))
+    if win.width() > avail.width() or win.height() > avail.height():
+        win.showMaximized()
+
+
 def run(argv=None) -> int:
     args = sys.argv if argv is None else argv
     app = QApplication.instance() or QApplication(args)
@@ -536,6 +552,7 @@ def run(argv=None) -> int:
     if before_main_window(app):
         return 0  # installing or updating; the new copy starts by itself
     win = MainWindow()
+    fit_to_screen(win)
     win.show()
     rest = args[1:]
     projects = [a for a in rest if is_project(a)]

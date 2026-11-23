@@ -82,20 +82,23 @@ class TaskBar(QWidget):
         self._on_fail = None
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 2, 6, 2)
-        self.status = QLabel("Ready.")
-        self.status.setMinimumWidth(200)
-        lay.addWidget(self.status, 1)
+        # The bar comes first, on the left, so it stays in sight even when the
+        # window is wider than the screen (the right-hand end is then cut off).
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setTextVisible(True)
         self.progress.setFormat("")
-        self.progress.setFixedWidth(320)
-        lay.addWidget(self.progress)
+        self.progress.setMinimumWidth(160)
+        self.progress.setMaximumWidth(320)
+        lay.addWidget(self.progress, 1)
         self.b_cancel = QPushButton("Cancel")
         self.b_cancel.setToolTip("Stop the current step. Nothing already loaded is lost.")
         self.b_cancel.clicked.connect(self.cancel)
         self.b_cancel.setVisible(False)
         lay.addWidget(self.b_cancel)
+        self.status = QLabel("Ready.")
+        self.status.setMinimumWidth(120)
+        lay.addWidget(self.status, 2)
         # Ticks while work runs, so the elapsed time keeps moving even during
         # a single long step.
         self._clock = QElapsedTimer()
