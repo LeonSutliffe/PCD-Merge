@@ -55,13 +55,18 @@ def align_clouds(clouds, settings, previews, quality_ref=None, *, progress):
 
 
 def merge_and_save(sources, names, transforms, path, include, add_source, compressed, spacing,
-                   cleanup, base_path, voxel_size, *, progress):
+                   cleanup, base_path, voxel_size, edits=None, keys=None, part=None, *,
+                   progress):
     n, partial, notes, stats = save_merged(
         sources, transforms, path, include, add_source=add_source, compressed=compressed,
         base_path=base_path, voxel_size=voxel_size, min_spacing=spacing, cleanup=cleanup,
-        progress=progress)
+        progress=progress, edits=edits, keys=keys, part=part)
     if stats is not None:
         notes = stats.lines([nm for nm, inc in zip(names, include) if inc]) + notes
+    if edits:
+        notes.append("the points deleted in Edit mode were left out")
+    if part is not None:
+        notes.append(f"only the part {part.name!r} was saved")
     return path, n, partial, notes, include
 
 
@@ -424,13 +429,18 @@ class AlignPanel(QWidget):
                               denoise=self.cb_denoise.isChecked(),
                               remove_moving=self.cb_moving.isChecked())
 
-    def merge(self):
+    def merge(self, part=None):
+        """Merge and save. Points deleted in Edit mode are left out; ``part``
+        saves only that part of a split site. One scan on its own can be
+        saved too (cleaned up in Edit), with no alignment."""
         doc = self.doc
         result = doc.result
-        if result is None:
+        if result is None and len(doc.scans) != 1:
             return
         include = [True] * len(doc.scans)
-        if not result.ok:
+        if result is None:
+            pass
+        elif not result.ok:
             bad = [s.name for s, ok in zip(doc.scans, result.connected) if not ok]
             box = QMessageBox(self)
             box.setWindowTitle("PCD Merge")
@@ -495,13 +505,17 @@ class AlignPanel(QWidget):
         opts = self.cleanup_options()
         spacing = self.spacing.value() or None
 
+        edits = doc.edit_snapshot()
+        keys = [s.entry.key for s in doc.scans]
+
         def go():
             sources = [s.source() for s in doc.scans]
             self.win.tasks.run(
                 merge_and_save,
                 (sources, [s.name for s in doc.scans], doc.transforms(), path, include,
                  self.cb_source.isChecked(), compressed, spacing, opts,
-                 base.entry.path if base is not None else None, result.voxel_size),
+                 base.entry.path if base is not None else None,
+                 result.voxel_size if result is not None else None, edits, keys, part),
                 self._merged, "Merging…")
 
         if opts.any or spacing or compressed:

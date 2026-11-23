@@ -162,3 +162,78 @@ def test_close_project_saves_and_empties_the_window(window, qtbot, scans, tmp_pa
     from pcd_merge.project import Project
 
     assert Project.open(folder).scans[0].visible is False  # saved on close
+
+
+def test_edit_mode_select_delete_undo_and_save(window, qtbot, scans, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+
+    from pcd_merge.edits import Box
+    from pcd_merge.gui import align_panel as ap
+    from pcd_merge.gui.view3d import HAVE_GL
+
+    win = window()
+    win.resize(1200, 800)
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    doc, panel, view = win.doc, win.edit_panel, win.view
+    win.modes.setCurrentIndex(1)
+    assert win.right.currentWidget() is panel and view.edit_mode
+    assert not panel.b_delete.isEnabled() and not win.a_undo.isEnabled()
+
+    # select one half of the scan (as a tool would: regions in space)
+    full = read_cloud(scans[0]).data
+    cut = float(np.median(full["x"]))
+    half = Box([-1e3, -1e3, -1e3], [cut, 1e3, 1e3])
+    panel.begin_selection(add=False, kind="box")
+    panel.extend_selection(half)
+    shown, est = panel.selected_estimate()
+    assert shown > 0 and est == pytest.approx(len(full) / 2, rel=0.1)
+    assert panel.b_delete.isEnabled() and win.a_delete.isEnabled()
+    panel.delete_selection()
+    assert len(doc.edits.point_edits) == 1 and panel.history.count() == 1
+    assert "Deleted about" in panel.history.item(0).text()
+    assert not panel.regions and not panel.b_delete.isEnabled()
+    proj, hidden = view.project_points(0)
+    assert np.array_equal(hidden, proj[:, 0] <= cut)
+    assert win.a_undo.isEnabled()
+    panel.undo()
+    assert not doc.edits and not view.project_points(0)[1].any() and win.a_redo.isEnabled()
+    panel.redo()
+    assert len(doc.edits.point_edits) == 1
+
+    if HAVE_GL:
+        # the brush picks the drawn point under the mouse
+        win.show()
+        qtbot.waitExposed(win)
+        panel.choose_tool("brush")
+        assert view.tool is not None and view.tool.name == "brush"
+        gv = view.view
+        mvp = view.camera_mvp()
+        keep = proj[~hidden]
+        target = keep[len(keep) // 2]
+        c = mvp @ np.r_[target, 1.0]
+        x = (c[0] / c[3] + 1) / 2 * gv.width()
+        y = (1 - c[1] / c[3]) / 2 * gv.height()
+        hit = view.pick(QPoint(int(round(x)), int(round(y))))
+        assert hit is not None and hit[0] > cut  # deleted points are not picked
+        qtbot.mouseClick(gv, Qt.LeftButton, pos=QPoint(int(round(x)), int(round(y))))
+        assert panel.regions and panel.kinds == ["brush"]
+        panel.clear_selection()
+        panel.choose_tool(None)
+        assert view.tool is None
+
+    # save the cleaned scan: every full-resolution point of the deleted half is left out
+    out = str(tmp_path / "clean.pcd")
+    monkeypatch.setattr(ap.QFileDialog, "getSaveFileName", lambda *a, **k: (out, ""))
+    monkeypatch.setattr(ap.QMessageBox, "information", lambda *a, **k: None)
+    assert panel.b_save.isEnabled()
+    panel._save()
+    _wait(qtbot, win)
+    got = read_cloud(out).data
+    assert len(got) == int((full["x"] > cut).sum()) and got["x"].min() > cut
+
+    # leaving Edit drops the tool and the selection, and the deleted points stay hidden
+    win.modes.setCurrentIndex(0)
+    assert not view.edit_mode and view.tool is None
+    assert view.project_points(0)[1].any()
+    win.doc.dirty = False  # untitled project with work in it: no "save first?" on close

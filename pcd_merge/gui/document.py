@@ -160,6 +160,7 @@ class Document(QObject):
         self.report_lines: list[str] = []
         self.export_samples: dict[str, np.ndarray] = {}  # merged clouds shown in the view
         self.dirty = False
+        self.edit_version = 0  # goes up with every change to the edits (the view caches by it)
         self._autosave = QTimer(self)
         self._autosave.setSingleShot(True)
         self._autosave.setInterval(self.AUTOSAVE_MS)
@@ -275,6 +276,52 @@ class Document(QObject):
             self.project.settings[key] = value
             self.touch("settings")
 
+    # ---- Edit mode
+
+    @property
+    def edits(self):
+        return self.project.edits
+
+    def hidden_by_edits(self, xyz: np.ndarray, i: int) -> np.ndarray:
+        """Which of scan ``i``'s project-frame points are not shown: deleted,
+        or outside every visible part."""
+        st = self.project.edits
+        hidden = st.deleted(xyz, self.scans[i].entry.key) if st else np.zeros(len(xyz), bool)
+        if st.parts:
+            inside = np.zeros(len(xyz), dtype=bool)
+            for p in st.parts:
+                if p.visible:
+                    inside |= p.contains(xyz)
+            hidden |= ~inside
+        return hidden
+
+    def edits_changed(self) -> None:
+        self.edit_version += 1
+        self.touch("edits")
+
+    def add_edit(self, edit) -> None:
+        self.project.edits.add(edit)
+        self.edits_changed()
+
+    def undo_edit(self):
+        e = self.project.edits.undo()
+        if e is not None:
+            self.edits_changed()
+        return e
+
+    def redo_edit(self):
+        e = self.project.edits.redo()
+        if e is not None:
+            self.edits_changed()
+        return e
+
+    def edit_snapshot(self):
+        """A copy of the edits for a background job (the panel may change them)."""
+        from ..edits import EditStack
+
+        st = self.project.edits
+        return EditStack(list(st.point_edits), list(st.parts)) if (st or st.parts) else None
+
     # ---- merged / exported clouds
 
     def export(self, path: str) -> dict | None:
@@ -349,6 +396,7 @@ class Document(QObject):
         self.export_samples = {}
         self.forget_alignment()
         self.dirty = False
+        self.edit_version += 1
         self.changed.emit("project")
 
     def open(self, path: str) -> list[ScanEntry]:
@@ -376,6 +424,7 @@ class Document(QObject):
         else:
             project.alignment = project.quality = None
         self.dirty = False
+        self.edit_version += 1
         add_recent(project.folder)
         self.changed.emit("project")
         return [s.entry for s in self.scans if not len(s.sample)]

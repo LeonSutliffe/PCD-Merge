@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 import sys
 
+import numpy as np
+
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMessageBox, QSplitter,
@@ -32,7 +34,8 @@ from ..project import SUFFIX, ProjectError, from_manifest, is_project, recent_pr
 from ..readers import find_scan_files, input_filter
 from .align_panel import AlignPanel
 from .document import Document, load_clouds, load_files, sample_file, sample_missing
-from .mode_panels import EditPanel, InspectPanel
+from .edit_panel import EditPanel
+from .mode_panels import InspectPanel
 from .project_panel import ProjectPanel
 from .view3d import HAVE_GL, View3D
 from .workers import TaskBar
@@ -54,7 +57,7 @@ class MainWindow(QMainWindow):
         self.project_panel = ProjectPanel(self.doc)
         self.view = View3D(self.doc)
         self.align_panel = AlignPanel(self)
-        self.edit_panel = EditPanel()
+        self.edit_panel = EditPanel(self)
         self.inspect_panel = InspectPanel()
         self.right = QStackedWidget()
         for p in (self.align_panel, self.edit_panel, self.inspect_panel):
@@ -76,12 +79,12 @@ class MainWindow(QMainWindow):
             self.modes.addTab(m)
         self.modes.setTabToolTip(0, "Get the scans into one frame, check the quality, merge "
                                     "and export.")
-        self.modes.setTabToolTip(1, "Check and clean the scans: select, delete, split "
-                                    "(selection tools come in 0.10).")
+        self.modes.setTabToolTip(1, "Check and clean the scans: select points and delete or "
+                                    "restore them.")
         self.modes.setTabToolTip(2, "Read-only, full-quality viewing and measuring (0.11).")
         self.modes.setExpanding(False)
         self.modes.setStyleSheet("QTabBar::tab { padding: 4px 18px; font-weight: bold; }")
-        self.modes.currentChanged.connect(self.right.setCurrentIndex)
+        self.modes.currentChanged.connect(self._mode_changed)
         self._build_menus()
         self.menuBar().setCornerWidget(self.modes, Qt.TopRightCorner)
 
@@ -98,6 +101,7 @@ class MainWindow(QMainWindow):
         self.project_panel.remove_export.connect(self.doc.remove_export)
         self.align_panel.status.connect(self.tasks.set_status)
         self.view.walk_requested.connect(self.walk_through)
+        self.view.selection_changed.connect(self._update_buttons)
 
         self.align_panel.load_settings()
         self._update_title()
@@ -146,6 +150,24 @@ class MainWindow(QMainWindow):
         f.addSeparator()
         self._action(f, "Quit", self.close, "Ctrl+Q")
 
+        e = mb.addMenu("&Edit")
+        self.a_undo = self._action(e, "Undo edit", self.edit_panel.undo, "Ctrl+Z")
+        self.a_redo = self._action(e, "Redo edit", self.edit_panel.redo, "Ctrl+Y")
+        self.a_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        e.addSeparator()
+        self.a_delete = self._action(e, "Delete selected points", self.edit_panel.delete_selection,
+                                     "Del")
+        self.a_restore = self._action(e, "Restore selected points",
+                                      self.edit_panel.restore_selection)
+        self.a_select_none = self._action(e, "Select nothing", self.edit_panel.clear_selection,
+                                          "Ctrl+D")
+        e.addSeparator()
+        for key, label, keys in ((None, "Move the view", "V"), ("brush", "Brush", "B"),
+                                 ("rectangle", "Rectangle", "R"), ("lasso", "Lasso", "L"),
+                                 ("object", "Object", "O")):
+            self._action(e, f"Tool: {label}", lambda _=False, k=key: self._pick_tool(k), keys)
+        self.edit_menu = e
+
         v = mb.addMenu("&View")
         self._action(v, "Reset view", self.view.fit, "Home")
         for k, name in enumerate(("Top", "Front", "Side"), start=1):
@@ -184,10 +206,27 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{p.name}{mark}{where} - PCD Merge {__version__}")
         self.project_panel.refresh()
 
+    def _mode_changed(self, i):
+        self.right.setCurrentIndex(i)
+        self.edit_panel.activate(i == 1)
+        self._update_buttons()
+
+    def _pick_tool(self, key):
+        if self.modes.currentIndex() == 1:
+            self.edit_panel.choose_tool(key)
+
     def _update_buttons(self, *_):
         busy = self.tasks.busy
         self.project_panel.set_busy(busy)
         self.align_panel.update_buttons(busy)
+        self.edit_panel.update_buttons(busy)
+        editing = self.modes.currentIndex() == 1
+        st = self.doc.edits
+        self.a_undo.setEnabled(editing and not busy and st.can_undo())
+        self.a_redo.setEnabled(editing and not busy and st.can_redo())
+        sel = editing and not busy and bool(self.edit_panel.regions)
+        self.a_delete.setEnabled(sel)
+        self.a_restore.setEnabled(sel)
         self.view.update_controls(busy)
         for a in (self.a_add, self.a_folder):
             a.setEnabled(not busy)
@@ -199,15 +238,21 @@ class MainWindow(QMainWindow):
     def _doc_changed(self, what):
         if what == "scans":
             self.view.leave_walk()
+            self.edit_panel.clear_selection()
             self.align_panel.scans_changed()
             self.view.update_controls(self.tasks.busy)
             self.view.redraw()
         elif what in ("visibility", "exports"):
             self.view.redraw()
+            self.edit_panel.refresh()
+        elif what == "edits":
+            self.edit_panel.edits_changed()
         elif what == "project":
             self.view.leave_walk()
             self.align_panel.load_settings()
             self.align_panel.cleanup_changed()
+            self.edit_panel.clear_selection()
+            self.edit_panel.refresh()
             self.view.update_controls(self.tasks.busy)
             if self.doc.aligned:
                 self.view.show_aligned()
@@ -356,7 +401,9 @@ class MainWindow(QMainWindow):
         transforms = [tfs[i] if aligned else np.eye(4) for i in shown]
         title = ("Walk through: " + ", ".join(c.name for c in clouds[:3])
                  + (f" and {len(clouds) - 3} more" if len(clouds) > 3 else ""))
-        self.tasks.run(build_scene, (clouds, transforms),
+        edits = self.doc.edit_snapshot()
+        keys = [self.doc.scans[i].entry.key for i in shown]
+        self.tasks.run(walk_scene, (clouds, transforms, [tfs[i] for i in shown], edits, keys),
                        lambda scene: self._walk_ready(scene, title), "Preparing walk-through…")
 
     def _walk_ready(self, scene, title):
@@ -521,6 +568,31 @@ class MainWindow(QMainWindow):
         self.align_panel.shutdown()
         self.tasks.wait()
         super().closeEvent(e)
+
+
+def walk_scene(clouds, transforms, edit_transforms, edits, keys, *, progress):
+    """The walk-through's scene, without the points deleted in Edit mode."""
+    if edits is not None:
+        from ..edits import filter_clouds
+
+        progress("Leaving out deleted points", 0.0)
+        clouds = filter_clouds(clouds, edit_transforms, edits, keys)
+        if edits.parts:  # only the visible parts
+            vis = [p for p in edits.parts if p.visible]
+            clouds = [_in_parts(c, t, vis) for c, t in zip(clouds, edit_transforms)]
+    return build_scene(clouds, transforms, progress=progress)
+
+
+def _in_parts(cloud, t, parts):
+    from ..edits import project_xyz
+    from ..pcd_io import PointCloud
+
+    xyz = project_xyz(cloud.data, t)
+    keep = np.zeros(len(xyz), dtype=bool)
+    for p in parts:
+        keep |= p.contains(xyz)
+    return cloud if keep.all() else PointCloud(cloud.data[keep], cloud.path, cloud.viewpoint,
+                                               dict(cloud.extra))
 
 
 def _key(cloud) -> str:

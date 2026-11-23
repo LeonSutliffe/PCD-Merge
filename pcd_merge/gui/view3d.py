@@ -9,8 +9,8 @@ window. A tool bar along the top of the view changes with the app's mode.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel,
                                QPushButton, QRadioButton, QSlider, QStackedWidget, QVBoxLayout,
                                QWidget)
@@ -25,12 +25,18 @@ try:
 except Exception:  # pragma: no cover - depends on the machine's OpenGL
     HAVE_GL = False
 
+SELECT_COLOUR = (1.0, 0.85, 0.1, 1.0)  # the Edit selection: yellow
+DELETED_COLOUR = (0.45, 0.12, 0.12, 1.0)  # deleted points, when shown: dark red
+
 # camera presets: name -> (elevation, azimuth) in degrees
 CAMERAS = {"Orbit": None, "Top": (90, -90), "Front": (0, -90), "Side": (0, 0)}
 
 
 class View3D(QWidget):
     walk_requested = Signal()
+    selection_changed = Signal()
+
+    NAV_HINT = "Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom"
 
     def __init__(self, doc, parent=None):
         super().__init__(parent)
@@ -40,6 +46,17 @@ class View3D(QWidget):
         self._walk = None
         self._ortho = False
         self.removed_hidden = False  # clean-up preview: hide removed points instead of white
+        # Edit mode
+        self.edit_mode = False
+        self.tool = None  # an edit_tools.Tool while one is chosen
+        self.selection = []  # regions selected in Edit mode (not yet deleted)
+        self.show_deleted = False  # draw deleted points (dark red) instead of hiding them
+        self._sel_masks = {}  # scan index -> mask of its drawn points that are selected
+        self._edit_cache = {}  # scan index -> (key, project-frame points, hidden mask)
+        self._redraw_soon = QTimer(self)
+        self._redraw_soon.setSingleShot(True)
+        self._redraw_soon.setInterval(40)
+        self._redraw_soon.timeout.connect(self.redraw)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -109,9 +126,14 @@ class View3D(QWidget):
         if HAVE_GL:
             self.view = gl.GLViewWidget()
             self.view.setBackgroundColor((25, 25, 30))
+            self.view.setMouseTracking(True)
+            self.overlay = _Overlay(self)
+            self._filter = _ToolFilter(self)
+            self.view.installEventFilter(self._filter)
             self.stack.addWidget(self.view)
         else:
             self.view = None
+            self.overlay = None
             msg = QLabel("3D preview unavailable (OpenGL could not be initialised).")
             msg.setAlignment(Qt.AlignCenter)
             self.stack.addWidget(msg)
@@ -121,9 +143,9 @@ class View3D(QWidget):
         self.bottom = QWidget()
         bottom = QHBoxLayout(self.bottom)
         bottom.setContentsMargins(4, 0, 4, 2)
-        hint = QLabel("Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom")
-        hint.setStyleSheet(HINT_STYLE)
-        bottom.addWidget(hint)
+        self.hint = QLabel(self.NAV_HINT)
+        self.hint.setStyleSheet(HINT_STYLE)
+        bottom.addWidget(self.hint)
         bottom.addStretch(1)
         self.legend = QWidget()
         lg = QHBoxLayout(self.legend)
@@ -158,6 +180,10 @@ class View3D(QWidget):
         self.rb_aligned.setEnabled(doc.aligned)
         if not doc.aligned and self.rb_aligned.isChecked():
             self.rb_orig.setChecked(True)
+        if self.edit_mode and doc.aligned and not self.rb_aligned.isChecked():
+            self.rb_aligned.setChecked(True)
+        # edits are made where the scans are aligned, so Edit always shows that
+        self.rb_orig.setEnabled(not (self.edit_mode and doc.aligned))
         self.colour_mode.setEnabled(doc.quality is not None)
         if doc.quality is None:
             self.colour_mode.setCurrentIndex(0)
@@ -183,6 +209,7 @@ class View3D(QWidget):
     def redraw(self, *_):
         if self.view is None:
             return
+        self._redraw_soon.stop()
         for it in self._items:
             self.view.removeItem(it)
         self._items = []
@@ -197,33 +224,158 @@ class View3D(QWidget):
         if q is not None:
             self.legend_hi.setText(fmt_distance(q.scale_max))
         size = float(self.pt_size.value())
-        tfs = doc.transforms()
         for i, (xyz, scan) in enumerate(zip(previews, doc.scans)):
             if not scan.entry.visible or not len(xyz):
                 continue
-            pts = xyz
-            if aligned:
-                t = tfs[i]
-                pts = xyz @ t[:3, :3].T + t[:3, 3]
+            proj, hidden = self.project_points(i)
+            pts = proj if aligned else xyz
             pts = (pts - origin).astype(np.float32)
             if heat and len(q.point_error[i]) >= len(pts):
                 color = error_colours(q.point_error[i][:len(pts)], q.scale_max)
             else:
                 color = (*cloud_colour(i), 1.0)
-            keep = None
+            keep = ~hidden
+            if hidden.any() and self.edit_mode and self.show_deleted:
+                self._add_points(pts[hidden], DELETED_COLOUR, size)
             if aligned and self._removed is not None and i < len(self._removed) \
                     and len(self._removed[i]) == len(pts):
-                keep = self._removed[i]
-            if keep is not None and not keep.all():
-                gone = pts[~keep]
+                gone = keep & ~self._removed[i]
+                if gone.any() and not self.removed_hidden:
+                    self._add_points(pts[gone], REMOVED_COLOUR, size + 1)
+                keep &= self._removed[i]
+            sel = self._sel_masks.get(i) if self.edit_mode else None
+            if sel is not None and len(sel) == len(pts) and sel.any():
+                self._add_points(pts[sel], SELECT_COLOUR, size + 1)
+                keep &= ~sel
+            if not keep.all():
                 pts = pts[keep]
                 if isinstance(color, np.ndarray) and color.ndim == 2:
                     color = color[keep]
-                if not self.removed_hidden:
-                    self._add_points(gone, REMOVED_COLOUR, size + 1)
             self._add_points(pts, color, size)
         for xyz in doc.visible_exports():
             self._add_points((xyz - origin).astype(np.float32), (*EXPORT_COLOUR, 1.0), size)
+
+    def redraw_soon(self):
+        """Redraw after a moment (several changes in a row draw once)."""
+        if not self._redraw_soon.isActive():
+            self._redraw_soon.start()
+
+    # ---------------------------------------------------------------- edits
+
+    def project_points(self, i: int):
+        """Scan ``i``'s drawn points in the project frame (where the edits
+        are), and which of them the edits hide (deleted, or in a hidden part)."""
+        doc = self.doc
+        xyz = doc.previews()[i]
+        t = doc.transforms()[i]
+        key = (doc.edit_version, id(doc.scans[i].sample), len(xyz), t.tobytes())
+        hit = self._edit_cache.get(i)
+        if hit is not None and hit[0] == key:
+            return hit[1], hit[2]
+        proj = xyz @ t[:3, :3].T + t[:3, 3]
+        hidden = doc.hidden_by_edits(proj, i)
+        self._edit_cache[i] = (key, proj, hidden)
+        return proj, hidden
+
+    def set_edit_mode(self, on: bool):
+        self.edit_mode = on
+        if not on:
+            self.set_tool(None)
+            self.set_selection([])
+        self.update_controls(False)
+        self.redraw()
+
+    def set_tool(self, tool):
+        if self.tool is not None:
+            self.tool.cancel()
+        self.tool = tool
+        if self.view is not None:
+            self.view.setCursor(tool.cursor if tool is not None else Qt.ArrowCursor)
+            self.overlay.update()
+        self.hint.setText(tool.hint if tool is not None else self.NAV_HINT)
+
+    def set_selection(self, regions):
+        self.selection = list(regions)
+        self._sel_masks = {}
+        for r in self.selection:
+            self._or_selection(r)
+        self.redraw()
+        self.selection_changed.emit()
+
+    def extend_selection(self, region):
+        """Add one region to the selection (a brush dab, a lasso)."""
+        self.selection.append(region)
+        self._or_selection(region)
+        self.redraw_soon()
+        self.selection_changed.emit()
+
+    def _or_selection(self, region):
+        for i, scan in enumerate(self.doc.scans):
+            if not scan.entry.visible:
+                continue
+            proj, hidden = self.project_points(i)
+            if not len(proj):
+                continue
+            m = region.mask(proj)
+            if not self.show_deleted:
+                m &= ~hidden
+            old = self._sel_masks.get(i)
+            self._sel_masks[i] = m if old is None or len(old) != len(m) else old | m
+
+    def selected_counts(self):
+        """Per scan index: (drawn points selected, drawn points of the scan)."""
+        return {i: (int(m.sum()), len(m)) for i, m in self._sel_masks.items()}
+
+    def camera_mvp(self) -> np.ndarray:
+        """Maps project-frame points to clip space with the current camera."""
+        v = self.view
+        vp = v.getViewport()
+        m = v.projectionMatrix(vp, vp) * v.viewMatrix()
+        a = np.array(m.data(), dtype=float).reshape(4, 4).T  # Qt stores columns
+        shift = np.eye(4)
+        shift[:3, 3] = -self.doc.origin()  # points are drawn relative to the origin
+        return a @ shift
+
+    def ndc(self, pos) -> np.ndarray:
+        """A position in the view widget (logical pixels) in device coordinates."""
+        v = self.view
+        return np.array([2.0 * pos.x() / max(1, v.width()) - 1.0,
+                         1.0 - 2.0 * pos.y() / max(1, v.height())])
+
+    def pick(self, pos, radius_px: float = 7.0):
+        """The nearest drawn point under the mouse (project frame), or None."""
+        if self.view is None:
+            return None
+        mvp = self.camera_mvp()
+        target = self.ndc(pos)
+        half = np.array([self.view.width() / 2.0, self.view.height() / 2.0])
+        best, best_w = None, np.inf
+        for i, scan in enumerate(self.doc.scans):
+            if not scan.entry.visible:
+                continue
+            proj, hidden = self.project_points(i)
+            if not len(proj):
+                continue
+            pts = proj if self.show_deleted else proj[~hidden]
+            clip = pts @ mvp[:3, :3].T + mvp[:3, 3]
+            w = pts @ mvp[3, :3] + mvp[3, 3]
+            front = w > 1e-9
+            if not front.any():
+                continue
+            d = (clip[front, :2] / w[front, None] - target) * half
+            near = np.einsum("ij,ij->i", d, d) <= radius_px * radius_px
+            if near.any():
+                ws = w[front][near]
+                k = int(np.argmin(ws))
+                if ws[k] < best_w:
+                    best_w, best = ws[k], pts[front][near][k]
+        return best
+
+    def pixel_size(self) -> float:
+        """Roughly how much one pixel spans in the scene, at the view's centre."""
+        if self.view is None:
+            return 0.01
+        return float(self.view.pixelSize(self.view.opts["center"]))
 
     def _add_points(self, pts, color, size):
         if not len(pts):
@@ -296,6 +448,71 @@ class View3D(QWidget):
         w.deleteLater()
         self.toolbar.show()
         self.bottom.show()
+
+
+class _Overlay(QWidget):
+    """Draws the tool's outline (lasso, rectangle, brush circle) over the view."""
+
+    def __init__(self, owner: View3D):
+        super().__init__(owner.view)
+        self.owner = owner
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.resize(owner.view.size())
+        self.show()
+
+    def paintEvent(self, _e):
+        tool = self.owner.tool
+        if tool is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        tool.paint(p)
+        p.end()
+
+
+class _ToolFilter(QObject):
+    """Sends the 3D view's mouse to the chosen Edit tool. Alt + drag (and the
+    right and middle buttons, and the wheel) still move the camera."""
+
+    def __init__(self, owner: View3D):
+        super().__init__(owner)
+        self.owner = owner
+
+    def eventFilter(self, obj, ev):
+        owner = self.owner
+        t = ev.type()
+        if t == QEvent.Resize and owner.overlay is not None:
+            owner.overlay.resize(obj.size())
+            return False
+        tool = owner.tool
+        if tool is None:
+            return False
+        if t == QEvent.KeyPress and ev.key() == Qt.Key_Escape:
+            tool.cancel()
+            owner.overlay.update()
+            return False
+        if t in (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease):
+            if ev.modifiers() & Qt.AltModifier:
+                return False
+            if t == QEvent.MouseButtonPress:
+                if ev.button() != Qt.LeftButton:
+                    return False
+                done = tool.press(ev)
+            elif t == QEvent.MouseMove:
+                if ev.buttons() & (Qt.RightButton | Qt.MiddleButton):
+                    return False
+                done = tool.move(ev)
+            else:
+                if ev.button() != Qt.LeftButton:
+                    return False
+                done = tool.release(ev)
+            owner.overlay.update()
+            return bool(done)
+        if t == QEvent.Leave:
+            tool.leave()
+            owner.overlay.update()
+        return False
 
 
 def _swatch(rgb) -> QPixmap:
