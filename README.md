@@ -212,6 +212,12 @@ points: nothing is resampled, averaged or moved, so the points that remain keep
 their exact coordinates and every field. The finished dialog says how many
 points each step removed from each file.
 
+Once the clouds are aligned, ticking or unticking an option updates the 3D
+preview straight away: the points that would be removed are highlighted in
+white (or hidden, if you choose *Hide*), with an estimate of how many points
+that is. The preview works on the sample of each cloud that the view shows, so
+it is quick even for very large scans; the merge itself uses every point.
+
 * **Remove duplicate points where scans overlap.** Where two scans cover the
   same spot you otherwise get two interleaved copies of every surface. Space is
   split into small cubes (*cell*, automatic = a few times the point spacing); in

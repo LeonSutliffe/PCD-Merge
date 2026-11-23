@@ -121,3 +121,22 @@ def test_cli_cleanup_flags(tmp_path, setup):
     m = read_pcd(out)
     assert 0.5 * sum(len(c) for c in clouds) < len(m) < 0.9 * sum(len(c) for c in clouds)
     assert m.field_names == ("x", "y", "z", "intensity", "ring")
+
+
+def test_clean_masks_match_clean_and_weights_pick_the_denser_full_cloud(setup):
+    from pcd_merge.cleanup import clean, clean_masks
+
+    clouds, tf, _ = setup
+    parts = [transform_cloud(c, t) for c, t in zip(clouds, tf)]
+    origins = [t[:3, 3] for t in tf]
+    opts = CleanupOptions(dedup=True, denoise=True, remove_moving=True)
+    keep, stats = clean_masks([_xyz(p) for p in parts], origins, opts)
+    cleaned, stats2 = clean([p.copy() for p in parts], origins, opts)
+    for p, k, c in zip(parts, keep, cleaned):
+        np.testing.assert_array_equal(p[k], c)
+    assert stats.duplicate == stats2.duplicate and stats.moving == stats2.moving
+    # Same coverage, but cloud 1 stands for a 10x denser full cloud: it wins.
+    rng = np.random.default_rng(0)
+    a, b = rng.uniform(0, 10, (5000, 3)), rng.uniform(0, 10, (2000, 3))
+    k = dedup_mask([a, b], 2.0, weights=[1.0, 10.0])
+    assert not k[0].any() and k[1].all()
