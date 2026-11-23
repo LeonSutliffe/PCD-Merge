@@ -64,6 +64,28 @@ def _merged_dtype(dtypes: list[np.dtype]) -> tuple[np.dtype, list[str]]:
     return np.dtype(fields), missing
 
 
+def source_ids(clouds: list[PointCloud]) -> list[int | None]:
+    """The ``source`` value each cloud's points get in the merged file.
+
+    Clouds that already have a ``source`` field (an earlier merge result)
+    keep their values and get ``None`` here; the others are numbered after
+    the highest existing value, in order. With no existing field this is
+    simply 0, 1, 2, ...
+    """
+    next_id = 0
+    for c in clouds:
+        if c.has_field("source") and len(c):
+            next_id = max(next_id, int(np.nanmax(c.data["source"])) + 1)
+    out: list[int | None] = []
+    for c in clouds:
+        if c.has_field("source"):
+            out.append(None)
+        else:
+            out.append(next_id)
+            next_id += 1
+    return out
+
+
 def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
                  add_source_field: bool = False) -> tuple[np.ndarray, list[str]]:
     """Transform every cloud and concatenate all of their points.
@@ -73,16 +95,22 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
     partially-present fields so the caller can warn about them.
 
     ``add_source_field`` adds a ``source`` field (U2) holding the index of the
-    file each point came from.
+    file each point came from. If a cloud already has a ``source`` field (it
+    is an earlier merge result being added to), that numbering is continued
+    for the new clouds whether or not ``add_source_field`` is set; see
+    :func:`source_ids`.
     """
     if len(clouds) != len(transforms):
         raise ValueError("one transform per cloud is required")
     parts = [transform_cloud(c, t) for c, t in zip(clouds, transforms)]
     dtype, missing = _merged_dtype([p.dtype for p in parts])
-    if add_source_field:
-        if "source" in dtype.names:
-            raise ValueError("clouds already have a 'source' field")
+    has_source = "source" in dtype.names
+    ids = source_ids(clouds)
+    if add_source_field and not has_source:
         dtype = np.dtype(dtype.descr + [("source", "<u2")])
+    if has_source and "source" in missing:
+        missing.remove("source")
+    number = add_source_field or has_source
 
     total = sum(len(p) for p in parts)
     out = np.zeros(total, dtype=dtype)
@@ -94,7 +122,7 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
                 out[name][sl] = p[name].view(dtype[name])
             else:
                 out[name][sl] = p[name]
-        if add_source_field:
-            out["source"][sl] = k
+        if number and ids[k] is not None:
+            out["source"][sl] = ids[k]
         pos += len(p)
     return out, missing

@@ -1,5 +1,9 @@
 """Command-line interface: ``pcd-merge a.pcd b.pcd [...] -o merged.pcd``.
 
+Folders can be given instead of files (every .pcd inside, in natural order).
+``--add-to merged.pcd new.pcd ...`` aligns new scans to an existing merged
+cloud and appends them to it.
+
 With no file arguments the desktop app is started instead.
 """
 
@@ -7,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 import numpy as np
@@ -18,7 +23,11 @@ def _parse(argv):
         description="Automatically align two or more PCD point clouds and merge them. "
         "Run without arguments to open the desktop app.",
     )
-    p.add_argument("files", nargs="*", help="PCD files; the first one is the reference frame")
+    p.add_argument("files", nargs="*",
+                   help="PCD files or folders of them; the first one is the reference frame")
+    p.add_argument("--add-to", metavar="MERGED",
+                   help="existing merged .pcd to add the new scans to; it stays fixed and "
+                        "the scans are aligned to it")
     p.add_argument("-o", "--output",
                    help="merged cloud to write; the extension picks the format: "
                    ".pcd, .ply, .las, .laz or .e57")
@@ -34,7 +43,10 @@ def _parse(argv):
                    help="thin the merged cloud so no two points are closer than D "
                    "(scan units); default: keep every point")
     p.add_argument("--force", action="store_true",
-                   help="merge even if some clouds could not be aligned")
+                   help="merge even if some clouds could not be aligned (they keep their "
+                        "original position)")
+    p.add_argument("--skip-unaligned", action="store_true",
+                   help="merge the clouds that aligned and leave out the ones that did not")
     p.add_argument("--selftest", action="store_true",
                    help="run a quick end-to-end check of this installation and exit")
     return p.parse_args(argv)
@@ -46,18 +58,30 @@ def main(argv=None) -> int:
         from .selftest import run as selftest
 
         return selftest()
-    if not args.files:
+    if not args.files and not args.add_to:
         from .gui import run
 
         return run()
 
-    from .exporters import format_of, write_cloud
-    from .merge import merge_clouds
+    from .exporters import format_of
+    from .files import already_merged, find_pcd_files, read_manifest, save_merged
     from .pcd_io import read_pcd
     from .registration import AlignSettings, align
 
-    if len(args.files) < 2:
-        print("error: give at least two PCD files", file=sys.stderr)
+    files = find_pcd_files(args.files)
+    base = args.add_to
+    if base:
+        files = [f for f in files if os.path.abspath(f) != os.path.abspath(base)]
+        dup = already_merged(read_manifest(base), files)
+        for f in dup:
+            print(f"note: {f} is already in {base}; skipping it")
+        files = [f for f in files if f not in dup]
+        if not files:
+            print("error: no new scans to add", file=sys.stderr)
+            return 2
+        files = [base] + files
+    elif len(files) < 2:
+        print("error: give at least two PCD files (or a folder containing them)", file=sys.stderr)
         return 2
     if args.output:
         try:
@@ -70,7 +94,7 @@ def main(argv=None) -> int:
         return 2
 
     clouds = []
-    for path in args.files:
+    for path in files:
         c = read_pcd(path)
         print(f"Loaded {c.name}: {len(c):,} points, fields: {', '.join(c.field_names)}")
         clouds.append(c)
@@ -79,7 +103,8 @@ def main(argv=None) -> int:
         print(f"[{frac:4.0%}] {msg}")
 
     xyz = [c.xyz[c.finite_mask()] for c in clouds]
-    result = align(xyz, AlignSettings(voxel_size=args.voxel, seed=args.seed), progress)
+    settings = AlignSettings(voxel_size=args.voxel, seed=args.seed, anchor=bool(base))
+    result = align(xyz, settings, progress)
 
     print(f"\nVoxel size used for alignment: {result.voxel_size:.4g}")
     for p in result.pairs:
@@ -98,22 +123,29 @@ def main(argv=None) -> int:
 
     if not args.output:
         return 0
-    if not result.ok and not args.force:
-        print("error: not all clouds could be aligned; not merging (use --force to merge anyway)",
-              file=sys.stderr)
-        return 1
-    merged, partial = merge_clouds(clouds, result.transforms, add_source_field=args.source_field)
+    include = [True] * len(clouds)
+    if not result.ok:
+        if args.skip_unaligned:
+            include = list(result.connected)
+            for c, inc in zip(clouds, include):
+                if not inc:
+                    print(f"note: leaving out {c.name} (not aligned)")
+            if sum(include) < 2:
+                print("error: fewer than two clouds aligned; nothing to merge", file=sys.stderr)
+                return 1
+        elif not args.force:
+            print("error: not all clouds could be aligned; not merging (use --skip-unaligned "
+                  "to leave them out, or --force to merge anyway)", file=sys.stderr)
+            return 1
+    n, partial, notes = save_merged(clouds, result.transforms, args.output, include,
+                                    add_source=args.source_field, compressed=args.compressed,
+                                    base_path=base, voxel_size=result.voxel_size,
+                                    min_spacing=args.min_spacing)
     if partial:
         print("note: fields missing from some files were filled with 0:", ", ".join(partial))
-    if args.min_spacing:
-        from .thinning import thin
-
-        before = len(merged)
-        merged = thin(merged, args.min_spacing)
-        print(f"Thinned to {args.min_spacing:g} spacing: kept {len(merged):,} of {before:,} points")
-    for note in write_cloud(args.output, merged, compressed=args.compressed):
+    for note in notes:
         print("note:", note)
-    print(f"Wrote {len(merged):,} points to {args.output}")
+    print(f"Wrote {n:,} points to {args.output} (scan list in {args.output}.json)")
     return 0
 
 
