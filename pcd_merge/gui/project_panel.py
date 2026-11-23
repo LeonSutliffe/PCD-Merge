@@ -13,7 +13,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QMenu, QPushButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from .common import swatch_icon
+from .common import export_icon, swatch_icon
 
 ROLE_INDEX = Qt.UserRole + 1
 
@@ -24,6 +24,8 @@ class ProjectPanel(QWidget):
     remove_scans = Signal(list)  # scan indices
     locate_scan = Signal(int)
     open_export = Signal(str)
+    export_toggled = Signal(str, bool)
+    remove_export = Signal(str)
 
     def __init__(self, doc, parent=None):
         super().__init__(parent)
@@ -53,15 +55,15 @@ class ProjectPanel(QWidget):
         self.g_scans = QTreeWidgetItem(["Scans"])
         self.g_parts = QTreeWidgetItem(["Parts"])
         self.g_meas = QTreeWidgetItem(["Measurements"])
-        self.g_exports = QTreeWidgetItem(["Exports"])
+        self.g_exports = QTreeWidgetItem(["Merged clouds"])
         for g in (self.g_scans, self.g_parts, self.g_meas, self.g_exports):
             g.setFlags(Qt.ItemIsEnabled)
             self.tree.addTopLevelItem(g)
         self.g_parts.setToolTip(0, "Splits of the scans (floors, wings) made in Edit mode "
                                    "(coming in 0.10).")
         self.g_meas.setToolTip(0, "Measurements made in Inspect mode (coming in 0.11).")
-        self.g_exports.setToolTip(0, "Clouds exported from this project. Double-click to "
-                                     "show the file.")
+        self.g_exports.setToolTip(0, "Clouds merged or exported from this project. Tick one "
+                                     "to show it in the 3D view.")
 
         row = QHBoxLayout()
         self.b_add = QPushButton("Add files…")
@@ -111,12 +113,20 @@ class ProjectPanel(QWidget):
         self.g_scans.setText(0, f"Scans ({len(doc.scans)})")
         self.g_exports.takeChildren()
         for ex in reversed(doc.project.exports[-20:]):
-            it = QTreeWidgetItem([f"{os.path.basename(ex['path'])}  ({ex['points']:,} pts)"])
-            it.setToolTip(0, f"{ex['path']}\n{ex.get('time', '')}")
+            gone = not os.path.isfile(ex["path"])
+            text = f"{os.path.basename(ex['path'])}  ({ex['points']:,} pts)"
+            it = QTreeWidgetItem([text + ("  [file missing]" if gone else "")])
+            it.setIcon(0, export_icon())
+            it.setToolTip(0, f"{ex['path']}\nSaved {ex.get('time', '').replace('T', ' ')}\n"
+                             "Tick to show it in the 3D view. Double-click to open its folder.")
             it.setData(0, ROLE_INDEX, ex["path"])
-            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            if not gone:
+                flags |= Qt.ItemIsUserCheckable
+                it.setCheckState(0, Qt.Checked if ex.get("visible") else Qt.Unchecked)
+            it.setFlags(flags)
             self.g_exports.addChild(it)
-        self.g_exports.setText(0, f"Exports ({len(doc.project.exports)})")
+        self.g_exports.setText(0, f"Merged clouds ({len(doc.project.exports)})")
         for g in (self.g_parts, self.g_meas):
             g.setDisabled(True)
         self.g_scans.setExpanded(expanded)
@@ -144,6 +154,8 @@ class ProjectPanel(QWidget):
         i = self._scan_index(item)
         if i is not None:
             self.doc.set_visible(i, item.checkState(0) == Qt.Checked)
+        elif item.parent() is self.g_exports:
+            self.export_toggled.emit(item.data(0, ROLE_INDEX), item.checkState(0) == Qt.Checked)
 
     def _double_clicked(self, item, _col):
         i = self._scan_index(item)
@@ -160,6 +172,17 @@ class ProjectPanel(QWidget):
     def _menu(self, pos):
         item = self.tree.itemAt(pos)
         i = self._scan_index(item)
+        if item is not None and item.parent() is self.g_exports:
+            path = item.data(0, ROLE_INDEX)
+            m = QMenu(self)
+            a = QAction("Open its folder", m)
+            a.triggered.connect(lambda: self.open_export.emit(path))
+            m.addAction(a)
+            a = QAction("Remove from list (the file is kept)", m)
+            a.triggered.connect(lambda: self.remove_export.emit(path))
+            m.addAction(a)
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if i is None:
             return
         m = QMenu(self)

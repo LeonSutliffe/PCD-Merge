@@ -31,7 +31,7 @@ from ..flyscene import build_scene
 from ..project import SUFFIX, ProjectError, from_manifest, is_project, recent_projects
 from ..readers import find_scan_files, input_filter
 from .align_panel import AlignPanel
-from .document import Document, load_clouds, load_files, sample_missing
+from .document import Document, load_clouds, load_files, sample_file, sample_missing
 from .mode_panels import EditPanel, InspectPanel
 from .project_panel import ProjectPanel
 from .view3d import HAVE_GL, View3D
@@ -93,6 +93,8 @@ class MainWindow(QMainWindow):
         self.project_panel.remove_scans.connect(self._remove_scans)
         self.project_panel.locate_scan.connect(self._locate)
         self.project_panel.open_export.connect(self._show_file)
+        self.project_panel.export_toggled.connect(self.show_export)
+        self.project_panel.remove_export.connect(self.doc.remove_export)
         self.align_panel.status.connect(self.tasks.set_status)
         self.view.walk_requested.connect(self.walk_through)
 
@@ -120,6 +122,9 @@ class MainWindow(QMainWindow):
         self._action(f, "Open project…", self._open_dialog, "Ctrl+O")
         self.recent_menu = f.addMenu("Open recent")
         self.recent_menu.aboutToShow.connect(self._fill_recent)
+        self.a_close = self._action(f, "Close project", self.close_project, "Ctrl+F4",
+                                    "Close this project (it is saved first) and start an "
+                                    "empty one.")
         self.a_save = self._action(f, "Save project", self.save_project, "Ctrl+S",
                                    "Projects save themselves after every change once they "
                                    "have a folder.")
@@ -188,6 +193,7 @@ class MainWindow(QMainWindow):
         self.a_walk.setEnabled(not busy and bool(self.doc.scans) and HAVE_GL)
         self.a_copy.setEnabled(not busy and self.doc.project.saved and bool(self.doc.scans))
         self.a_clear_cache.setEnabled(self.doc.project.saved)
+        self.a_close.setEnabled(not busy and (self.doc.project.saved or bool(self.doc.scans)))
 
     def _doc_changed(self, what):
         if what == "scans":
@@ -195,7 +201,7 @@ class MainWindow(QMainWindow):
             self.align_panel.scans_changed()
             self.view.update_controls(self.tasks.busy)
             self.view.redraw()
-        elif what == "visibility":
+        elif what in ("visibility", "exports"):
             self.view.redraw()
         elif what == "project":
             self.view.leave_walk()
@@ -379,6 +385,32 @@ class MainWindow(QMainWindow):
             return
         self.doc.new()
         self.tasks.set_status("New project. Add scans to start.")
+
+    def close_project(self):
+        if self.tasks.busy or not self._confirm_discard():
+            return
+        name = self.doc.project.name
+        self.doc.new()
+        self.tasks.set_status(f"{name} closed. Open a project or add scans to start a new one.")
+
+    def show_export(self, path: str, on: bool = True):
+        """Show or hide a merged cloud in the view (its preview is read once,
+        streamed, then kept in the project's cache)."""
+        self.doc.set_export_visible(path, on)
+        if not on or self.doc.cached_export_sample(path) is not None:
+            self.view.redraw()
+            return
+        if not os.path.isfile(path):
+            self.tasks.set_status(f"{os.path.basename(path)} is no longer there.")
+            return
+
+        def done(payload):
+            p, xyz = payload
+            self.doc.set_export_sample(p, xyz)
+            self.tasks.set_status(f"Showing {os.path.basename(p)}.")
+
+        if not self.tasks.run(sample_file, (path,), done, "Reading the merged cloud…"):
+            self.doc.set_export_visible(path, False)
 
     def _open_dialog(self):
         path = QFileDialog.getExistingDirectory(

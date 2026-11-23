@@ -158,6 +158,7 @@ class Document(QObject):
         self.result = None  # AlignResult of the last Align (or rebuilt from the project)
         self.quality: QualityReport | None = None
         self.report_lines: list[str] = []
+        self.export_samples: dict[str, np.ndarray] = {}  # merged clouds shown in the view
         self.dirty = False
         self._autosave = QTimer(self)
         self._autosave.setSingleShot(True)
@@ -192,6 +193,9 @@ class Document(QObject):
         for s in self.scans:
             if len(s.sample):
                 return s.sample[:2000].mean(axis=0)
+        for xyz in self.export_samples.values():
+            if len(xyz):
+                return xyz[:2000].mean(axis=0)
         return np.zeros(3)
 
     def visible(self) -> list[bool]:
@@ -271,6 +275,46 @@ class Document(QObject):
             self.project.settings[key] = value
             self.touch("settings")
 
+    # ---- merged / exported clouds
+
+    def export(self, path: str) -> dict | None:
+        key = os.path.normcase(os.path.abspath(path))
+        return next((e for e in self.project.exports
+                     if os.path.normcase(e.get("path", "")) == key), None)
+
+    def visible_exports(self) -> list[np.ndarray]:
+        """Preview samples of the merged clouds that are ticked (already in the
+        project frame, so they are drawn as they are)."""
+        return [self.export_samples[e["path"]] for e in self.project.exports
+                if e.get("visible") and e["path"] in self.export_samples]
+
+    def set_export_visible(self, path: str, on: bool) -> None:
+        e = self.export(path)
+        if e is not None and bool(e.get("visible")) != on:
+            e["visible"] = on
+            self.touch("visibility")
+
+    def set_export_sample(self, path: str, xyz: np.ndarray) -> None:
+        self.export_samples[path] = xyz
+        e = self.export(path)
+        if e is not None:
+            self.project.save_export_preview(e, xyz)
+        self.changed.emit("visibility")
+
+    def cached_export_sample(self, path: str) -> np.ndarray | None:
+        if path in self.export_samples:
+            return self.export_samples[path]
+        e = self.export(path)
+        xyz = self.project.load_export_preview(e) if e is not None else None
+        if xyz is not None:
+            self.export_samples[path] = xyz
+        return xyz
+
+    def remove_export(self, path: str) -> None:
+        self.project.remove_export(path)
+        self.export_samples.pop(path, None)
+        self.touch("exports")
+
     # ---- files
 
     def save(self) -> bool:
@@ -302,6 +346,7 @@ class Document(QObject):
         self._autosave.stop()
         self.project = Project()
         self.scans = []
+        self.export_samples = {}
         self.forget_alignment()
         self.dirty = False
         self.changed.emit("project")
@@ -314,6 +359,10 @@ class Document(QObject):
         self._autosave.stop()
         self.project = project
         self.scans = [Scan(e, project.load_preview(e), None) for e in project.scans]
+        self.export_samples = {}
+        for e in project.exports:
+            if e.get("visible") and (xyz := project.load_export_preview(e)) is not None:
+                self.export_samples[e["path"]] = xyz
         self.result, self.quality, self.report_lines = None, None, []
         if project.alignment and project.alignment_matches_scans():
             self.result = alignment_from_dict(project.alignment, project.transforms())
@@ -348,3 +397,9 @@ class Document(QObject):
         self.project.relocate(self.scans[i].entry, path)
         self.touch("scans")
 
+
+
+def sample_file(path, *, progress):
+    """Preview sample of a merged cloud, streamed (it can be huge)."""
+    progress(f"Reading a preview of {os.path.basename(path)}", 0.0)
+    return path, sample_points(open_scan(path), PREVIEW_POINTS)

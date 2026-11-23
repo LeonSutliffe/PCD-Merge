@@ -95,8 +95,10 @@ pcd-merge "Office.pcdproj"   # open a project
 The window has three parts and a row of mode tabs at the top right:
 
 * **Left, the project:** the scans (tick to show or hide, double-click a
-  missing one to point to where it is now), and the exports made from the
-  project. *Parts* and *Measurements* fill in with Edit (0.10) and Inspect
+  missing one to point to where it is now), and the **merged clouds** made
+  from the project. After a merge the result is listed there and shown in the
+  view instead of the scans; tick and untick scans and merged clouds to
+  compare them. *Parts* and *Measurements* fill in with Edit (0.10) and Inspect
   (0.11).
 * **Middle, the 3D view:** orbit, top / front / side, an orthographic option,
   and **Walk through** (first person) inside the same view.
@@ -105,7 +107,8 @@ The window has three parts and a row of mode tabs at the top right:
 
 **Projects.** *File > Save project as…* makes a folder `Name.pcdproj` that
 remembers the scans, the alignment, the quality report, the settings and the
-exports. From then on it saves itself after every change. Opening it again
+exports. From then on it saves itself after every change. *File > Close project*
+closes it (saved) and leaves an empty window. Opening it again
 (*File > Open project…* or *Open recent*) shows the aligned view straight away
 from its cache, without re-reading the scans; they are read only when
 something needs them (Align, the walk-through, clean-up). The scan files are
