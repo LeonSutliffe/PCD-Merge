@@ -103,7 +103,7 @@ The window has three parts and a row of mode tabs at the top right:
 * **Middle, the 3D view:** orbit, top / front / side, an orthographic option,
   and **Walk through** (first person) inside the same view.
 * **Right, the settings of the current mode.** **Align** has everything below.
-  **Edit** cleans the scans up (see *Edit mode*). **Inspect** says what is
+  **Edit** cleans the scans up and splits them (see *Edit mode*). **Inspect** says what is
   coming; the view works in it already.
 
 **Edit mode.** Choose a tool and select points in the view: **Brush** (click
@@ -119,6 +119,15 @@ every full-resolution point inside it, not just to the points drawn: merging,
 **Save cleaned cloud…** and the walk-through all leave them out. The scan
 files are never changed. If some scans are hidden, edits apply to the visible
 ones only.
+
+**Parts.** *Split into parts* cuts the site in two at a height (*Split here*,
+for floors) or along a **Cut line** you drag across the view (in a Top view, a
+vertical wall along the line). The parts are listed on the left: tick to show or
+hide them, double-click to rename, right-click > *Save this part…* to save one
+on its own. A part can be split again; Undo joins them back. **Colour: Height**
+in the view makes floors easy to tell apart. The **automatic clean-up**
+(duplicates, noise, moving objects) is set in Edit mode too and is applied when
+saving.
 
 **Projects.** *File > Save project as…* makes a folder `Name.pcdproj` that
 remembers the scans, the alignment, the quality report, the settings and the
@@ -324,8 +333,7 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned (see `docs/plan-1.0.md`): splitting into parts and clean-up in Edit
-  mode (0.10); Inspect mode with a full-quality COPC viewing file and measuring, and a
+* Planned (see `docs/plan-1.0.md`): Inspect mode with a full-quality COPC viewing file and measuring, and a
   manual 3-point alignment fallback (0.11).
 
 ## Large scans

@@ -99,6 +99,8 @@ class MainWindow(QMainWindow):
         self.project_panel.open_export.connect(self._show_file)
         self.project_panel.export_toggled.connect(self.show_export)
         self.project_panel.remove_export.connect(self.doc.remove_export)
+        self.project_panel.save_part.connect(self.save_part)
+        self.project_panel.tree.itemSelectionChanged.connect(self.edit_panel.refresh)
         self.align_panel.status.connect(self.tasks.set_status)
         self.view.walk_requested.connect(self.walk_through)
         self.view.selection_changed.connect(self._update_buttons)
@@ -211,6 +213,11 @@ class MainWindow(QMainWindow):
         self.edit_panel.activate(i == 1)
         self._update_buttons()
 
+    def save_part(self, part_id: str):
+        part = self.doc.part(part_id)
+        if part is not None:
+            self.align_panel.merge(part=part)
+
     def _pick_tool(self, key):
         if self.modes.currentIndex() == 1:
             self.edit_panel.choose_tool(key)
@@ -245,13 +252,17 @@ class MainWindow(QMainWindow):
         elif what in ("visibility", "exports"):
             self.view.redraw()
             self.edit_panel.refresh()
+        elif what == "parts":
+            self.edit_panel.refresh()
         elif what == "edits":
             self.edit_panel.edits_changed()
+            self.align_panel.update_cleanup_summary()
         elif what == "project":
             self.view.leave_walk()
             self.align_panel.load_settings()
             self.align_panel.cleanup_changed()
             self.edit_panel.clear_selection()
+            self.edit_panel._height_set = False
             self.edit_panel.refresh()
             self.view.update_controls(self.tasks.busy)
             if self.doc.aligned:

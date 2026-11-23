@@ -33,7 +33,11 @@ def scans(tmp_path):
 def window(qtbot, tmp_path, monkeypatch):
     monkeypatch.setenv("PCD_MERGE_CONFIG_DIR", str(tmp_path / "cfg"))
     from pcd_merge.gui import MainWindow
+    from pcd_merge.gui import main_window as mw
 
+    # never ask "save first?" about an untitled project (a modal box would hang the test)
+    monkeypatch.setattr(mw.QMessageBox, "question",
+                        lambda *a, **k: mw.QMessageBox.Discard)
     wins = []
 
     def make():
@@ -237,3 +241,58 @@ def test_edit_mode_select_delete_undo_and_save(window, qtbot, scans, tmp_path, m
     assert not view.edit_mode and view.tool is None
     assert view.project_points(0)[1].any()
     win.doc.dirty = False  # untitled project with work in it: no "save first?" on close
+
+
+def test_edit_mode_split_into_parts_and_save_one(window, qtbot, scans, tmp_path, monkeypatch):
+    from pcd_merge.gui import align_panel as ap
+    from pcd_merge.gui.edit_tools import cut_plane
+
+    win = window()
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    doc, panel, view = win.doc, win.edit_panel, win.view
+    win.modes.setCurrentIndex(1)
+    # clean-up options now live in Edit
+    assert win.align_panel.cleanup_box.parent() is not None
+    assert panel.isAncestorOf(win.align_panel.cleanup_box)
+
+    full = read_cloud(scans[0]).data
+    panel.split_height.setValue(float(np.median(full["z"])))
+    h = panel.split_height.value()  # rounded to centimetres
+    panel.split_at_height()
+    parts = doc.edits.parts
+    assert [p.name for p in parts] == [f"above {h:.2f} m", f"below {h:.2f} m"]
+    tree = win.project_panel.g_parts
+    assert tree.childCount() == 2 and not tree.isDisabled()
+    # hide the lower part: its points are not drawn
+    tree.child(1).setCheckState(0, Qt.Unchecked)
+    assert not parts[1].visible
+    proj, hidden = view.project_points(0)
+    assert np.array_equal(hidden, proj[:, 2] < h)
+    # the split target is now a part; split the upper part again with a cut line
+    assert panel.split_target.currentData() == parts[0].id
+    mvp = np.diag([0.1, 0.1, -0.1, 1.0])  # looking straight down, orthographic
+    plane = cut_plane(np.array([0.0, -1.0]), np.array([0.0, 1.0]), mvp)  # the line x = 0
+    assert abs(abs(plane.normal[0]) - 1) < 1e-9 and abs(plane.offset) < 1e-9
+    panel.split_with(plane, ("Side A", "Side B"))
+    names = [p.name for p in doc.edits.parts]
+    assert names[0] == f"below {h:.2f} m" and names[1].endswith("Side A")
+    panel.undo()
+    assert len(doc.edits.parts) == 2
+    # rename in the tree
+    win.project_panel.g_parts.child(0).setText(0, "Upstairs")
+    assert doc.edits.parts[0].name == "Upstairs"
+
+    # save one part on its own
+    out = str(tmp_path / "upstairs.pcd")
+    monkeypatch.setattr(ap.QFileDialog, "getSaveFileName", lambda *a, **k: (out, ""))
+    monkeypatch.setattr(ap.QMessageBox, "information", lambda *a, **k: None)
+    win.save_part(doc.edits.parts[0].id)
+    _wait(qtbot, win)
+    got = read_cloud(out).data
+    assert len(got) == int((full["z"] >= h).sum())
+
+    # colour by height draws without the alignment error option
+    view.colour_mode.setCurrentIndex(2)
+    view.redraw()
+    win.doc.dirty = False

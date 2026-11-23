@@ -1,7 +1,7 @@
 """Left side of the window: the project tree, the same in every mode.
 
-Scans (tick to show or hide), and the groups later milestones fill: parts
-(splits, 0.10), measurements (0.11) and exports.
+Scans (tick to show or hide), parts (splits made in Edit), measurements
+(0.11) and merged clouds.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ class ProjectPanel(QWidget):
     open_export = Signal(str)
     export_toggled = Signal(str, bool)
     remove_export = Signal(str)
+    save_part = Signal(str)  # part id
 
     def __init__(self, doc, parent=None):
         super().__init__(parent)
@@ -59,8 +60,9 @@ class ProjectPanel(QWidget):
         for g in (self.g_scans, self.g_parts, self.g_meas, self.g_exports):
             g.setFlags(Qt.ItemIsEnabled)
             self.tree.addTopLevelItem(g)
-        self.g_parts.setToolTip(0, "Splits of the scans (floors, wings) made in Edit mode "
-                                   "(coming in 0.10).")
+        self.g_parts.setToolTip(0, "Pieces of the site (floors, wings) made by splitting in "
+                                   "Edit mode. Tick to show; double-click to rename; "
+                                   "right-click to save one on its own.")
         self.g_meas.setToolTip(0, "Measurements made in Inspect mode (coming in 0.11).")
         self.g_exports.setToolTip(0, "Clouds merged or exported from this project. Tick one "
                                      "to show it in the 3D view.")
@@ -127,8 +129,21 @@ class ProjectPanel(QWidget):
             it.setFlags(flags)
             self.g_exports.addChild(it)
         self.g_exports.setText(0, f"Merged clouds ({len(doc.project.exports)})")
-        for g in (self.g_parts, self.g_meas):
-            g.setDisabled(True)
+        self.g_parts.takeChildren()
+        parts = doc.project.edits.parts
+        for p in parts:
+            it = QTreeWidgetItem([p.name])
+            it.setData(0, ROLE_INDEX, p.id)
+            it.setToolTip(0, "Tick to show this part. Double-click to rename it; right-click "
+                             "to save it on its own or split it again.")
+            it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+                        | Qt.ItemIsEditable)
+            it.setCheckState(0, Qt.Checked if p.visible else Qt.Unchecked)
+            self.g_parts.addChild(it)
+        self.g_parts.setText(0, f"Parts ({len(parts)})" if parts else "Parts")
+        self.g_parts.setDisabled(not parts)
+        self.g_parts.setExpanded(True)
+        self.g_meas.setDisabled(True)
         self.g_scans.setExpanded(expanded)
         self.g_exports.setExpanded(True)
         self.tree.blockSignals(False)
@@ -156,6 +171,20 @@ class ProjectPanel(QWidget):
             self.doc.set_visible(i, item.checkState(0) == Qt.Checked)
         elif item.parent() is self.g_exports:
             self.export_toggled.emit(item.data(0, ROLE_INDEX), item.checkState(0) == Qt.Checked)
+        elif item.parent() is self.g_parts:
+            pid = item.data(0, ROLE_INDEX)
+            part = self.doc.part(pid)
+            if part is None:
+                return
+            if item.text(0).strip() and item.text(0) != part.name:
+                self.doc.rename_part(pid, item.text(0))
+            self.doc.set_part_visible(pid, item.checkState(0) == Qt.Checked)
+
+    def selected_part(self) -> str | None:
+        for it in self.tree.selectedItems():
+            if it.parent() is self.g_parts:
+                return it.data(0, ROLE_INDEX)
+        return None
 
     def _double_clicked(self, item, _col):
         i = self._scan_index(item)
@@ -172,6 +201,17 @@ class ProjectPanel(QWidget):
     def _menu(self, pos):
         item = self.tree.itemAt(pos)
         i = self._scan_index(item)
+        if item is not None and item.parent() is self.g_parts:
+            pid = item.data(0, ROLE_INDEX)
+            m = QMenu(self)
+            a = QAction("Save this part…", m)
+            a.triggered.connect(lambda: self.save_part.emit(pid))
+            m.addAction(a)
+            a = QAction("Rename", m)
+            a.triggered.connect(lambda: self.tree.editItem(item, 0))
+            m.addAction(a)
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if item is not None and item.parent() is self.g_exports:
             path = item.data(0, ROLE_INDEX)
             m = QMenu(self)

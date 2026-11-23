@@ -2,8 +2,8 @@
 
 Status: approved by Leon (2026-11-23). 0.9 built 2026-11-23: input formats,
 streamed merge/export, the `.pcdproj` project folder and the new layout with
-mode tabs (PR #17). 0.10 in progress: selection, delete/restore and undo
-(first Edit PR); split into parts and clean-up in Edit come next.
+mode tabs (PR #17). 0.10 built: selection, delete/restore, undo (PR #20),
+split into parts, clean-up and colour by height in Edit (PR #21). Next: 0.11.
 
 ## Where we are (0.8.0)
 

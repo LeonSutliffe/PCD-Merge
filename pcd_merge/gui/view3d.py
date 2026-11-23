@@ -81,10 +81,11 @@ class View3D(QWidget):
         top.addSpacing(12)
         top.addWidget(QLabel("Colour:"))
         self.colour_mode = QComboBox()
-        self.colour_mode.addItems(["Per scan", "Alignment error"])
+        self.colour_mode.addItems(["Per scan", "Alignment error", "Height"])
         self.colour_mode.setToolTip(
             "Alignment error colours each point by its distance to the surface of the other "
-            "scans: blue fits, red is off. Grey points are seen by only one scan.")
+            "scans: blue fits, red is off. Grey points are seen by only one scan. "
+            "Height goes from blue (low) to red (high), which makes floors easy to tell apart.")
         self.colour_mode.currentIndexChanged.connect(self.redraw)
         top.addWidget(self.colour_mode)
         top.addStretch(1)
@@ -184,8 +185,8 @@ class View3D(QWidget):
             self.rb_aligned.setChecked(True)
         # edits are made where the scans are aligned, so Edit always shows that
         self.rb_orig.setEnabled(not (self.edit_mode and doc.aligned))
-        self.colour_mode.setEnabled(doc.quality is not None)
-        if doc.quality is None:
+        self.colour_mode.model().item(1).setEnabled(doc.quality is not None)
+        if doc.quality is None and self.colour_mode.currentIndex() == 1:
             self.colour_mode.setCurrentIndex(0)
         self.b_walk.setEnabled(not busy and bool(doc.scans) and HAVE_GL)
 
@@ -224,13 +225,19 @@ class View3D(QWidget):
         if q is not None:
             self.legend_hi.setText(fmt_distance(q.scale_max))
         size = float(self.pt_size.value())
+        height = self.colour_mode.currentIndex() == 2 and self._height_range(aligned)
         for i, (xyz, scan) in enumerate(zip(previews, doc.scans)):
             if not scan.entry.visible or not len(xyz):
                 continue
             proj, hidden = self.project_points(i)
             pts = proj if aligned else xyz
+            if height:
+                lo, span = height
+                color = error_colours(np.clip(pts[:, 2] - lo, 0.0, span), span)
             pts = (pts - origin).astype(np.float32)
-            if heat and len(q.point_error[i]) >= len(pts):
+            if height:
+                pass  # coloured above, from the real heights
+            elif heat and len(q.point_error[i]) >= len(pts):
                 color = error_colours(q.point_error[i][:len(pts)], q.scale_max)
             else:
                 color = (*cloud_colour(i), 1.0)
@@ -254,6 +261,20 @@ class View3D(QWidget):
             self._add_points(pts, color, size)
         for xyz in doc.visible_exports():
             self._add_points((xyz - origin).astype(np.float32), (*EXPORT_COLOUR, 1.0), size)
+
+    def _height_range(self, aligned):
+        """(lowest, span) of the shown points' heights, ignoring the odd stray."""
+        zs = []
+        for i, scan in enumerate(self.doc.scans):
+            if scan.entry.visible and len(self.doc.previews()[i]):
+                proj, hidden = self.project_points(i)
+                pts = proj if aligned else self.doc.previews()[i]
+                zs.append(pts[~hidden, 2] if aligned else pts[:, 2])
+        z = np.concatenate(zs) if zs else np.zeros(0)
+        if not len(z):
+            return None
+        lo, hi = np.percentile(z, 1), np.percentile(z, 99)
+        return float(lo), float(max(hi - lo, 1e-6))
 
     def redraw_soon(self):
         """Redraw after a moment (several changes in a row draw once)."""

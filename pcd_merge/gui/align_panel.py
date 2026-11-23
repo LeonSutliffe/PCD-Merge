@@ -173,8 +173,8 @@ class AlignPanel(QWidget):
         self.b_base.clicked.connect(self._base_dialog)
         lv.addWidget(self.b_base)
 
-        # ---- clean-up
-        box = QGroupBox("Clean-up while merging (optional)")
+        # ---- clean-up: built here (the merge uses it) but shown in Edit mode
+        box = self.cleanup_box = QGroupBox("Automatic clean-up (applied when saving)")
         cl = QVBoxLayout(box)
         self.cb_dedup = QCheckBox("Remove duplicates where scans overlap")
         self.cb_dedup.setToolTip(
@@ -186,10 +186,12 @@ class AlignPanel(QWidget):
                                 "usually metres). Automatic is a few times the point spacing.")
         self.dedup_cell.setEnabled(False)
         self.cb_dedup.toggled.connect(self.dedup_cell.setEnabled)
+        cl.addWidget(self.cb_dedup)
         drow = QHBoxLayout()
-        drow.addWidget(self.cb_dedup, 1)
-        drow.addWidget(QLabel("cell:"))
+        drow.addSpacing(22)
+        drow.addWidget(QLabel("Cell size:"))
         drow.addWidget(self.dedup_cell)
+        drow.addStretch(1)
         cl.addLayout(drow)
         self.cb_denoise = QCheckBox("Remove isolated noise (dust, rain, strays)")
         self.cb_denoise.setToolTip(
@@ -218,7 +220,6 @@ class AlignPanel(QWidget):
         self.cleanup_info.setWordWrap(True)
         self.cleanup_info.setStyleSheet(HINT_STYLE)
         cl.addWidget(self.cleanup_info)
-        lv.addWidget(box)
 
         # clean-up preview: recomputed shortly after any option changes
         self._cleanup_gen = 0
@@ -249,6 +250,10 @@ class AlignPanel(QWidget):
         f2 = QFormLayout()
         f2.addRow("Min. point spacing:", self.spacing)
         ev.addLayout(f2)
+        self.cleanup_summary = QLabel()
+        self.cleanup_summary.setWordWrap(True)
+        self.cleanup_summary.setStyleSheet(HINT_STYLE)
+        ev.addWidget(self.cleanup_summary)
         self.b_merge = QPushButton("Accept and merge…")
         self.b_merge.setStyleSheet("font-weight: bold; padding: 6px;")
         self.b_merge.clicked.connect(self.merge)
@@ -583,12 +588,25 @@ class AlignPanel(QWidget):
         self.win.view.removed_hidden = i == 1
         self.win.view.redraw()
 
+    def update_cleanup_summary(self):
+        """The line under Merge saying what the merge will leave out."""
+        opts = self.cleanup_options()
+        chosen = [name for name, on in (("duplicates", opts.dedup), ("noise", opts.denoise),
+                                        ("moving objects", opts.remove_moving)) if on]
+        n_edits = len(self.doc.edits.point_edits)
+        self.cleanup_summary.setText(
+            ("Clean-up when merging: removes " + ", ".join(chosen) if chosen else
+             "No automatic clean-up")
+            + (f"; {n_edits} edit(s) leave points out" if n_edits else "")
+            + ". Both are set in Edit mode.")
+
     def cleanup_changed(self, *_):
         """Options, scans or alignment changed: drop the old preview and
         schedule a new one (debounced, so dragging the cell size stays smooth)."""
         self._cleanup_gen += 1
         self.win.view.set_removed(None)
         opts = self.cleanup_options()
+        self.update_cleanup_summary()
         if not opts.any:
             self.cleanup_info.setText("")
         elif self.doc.result is None:
