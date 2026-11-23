@@ -315,6 +315,28 @@ class Document(QObject):
             self.edits_changed()
         return e
 
+    def split(self, plane, names, within=None):
+        """Cut the site (or one part) in two along a plane (one undo step)."""
+        parts = self.project.edits.split(plane, names, within)
+        self.edits_changed()
+        return parts
+
+    def part(self, part_id: str):
+        return next((p for p in self.project.edits.parts if p.id == part_id), None)
+
+    def set_part_visible(self, part_id: str, on: bool) -> None:
+        p = self.part(part_id)
+        if p is not None and p.visible != on:
+            p.visible = on
+            self.edits_changed()
+
+    def rename_part(self, part_id: str, name: str) -> None:
+        p = self.part(part_id)
+        name = name.strip()
+        if p is not None and name and p.name != name:
+            p.name = name
+            self.touch("parts")
+
     def edit_snapshot(self):
         """A copy of the edits for a background job (the panel may change them)."""
         from ..edits import EditStack

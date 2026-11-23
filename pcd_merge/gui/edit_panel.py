@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox, QHBoxLayout,
                                QLabel, QListWidget, QListWidgetItem, QPushButton, QRadioButton,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from ..edits import Edit, grow_object, union
+from ..edits import Edit, HalfSpace, grow_object, union
 from .common import HINT_STYLE
 from .edit_tools import TOOLS
 
@@ -29,6 +29,9 @@ TOOL_LABELS = [
                        "the whole depth of the view."),
     ("object", "Object", "Click an object such as a chair, a person or a car: selects all of it, "
                          "without the floor or wall it touches."),
+    ("cut", "Cut line", "Drag a line across the view to split along it. The cut goes "
+                        "through the view direction: in a Top view it is a vertical wall "
+                        "along the line."),
 ]
 
 
@@ -67,6 +70,12 @@ class EditPanel(QWidget):
         self.tool_buttons = {}
         row = None
         for k, (key, label, tip) in enumerate(TOOL_LABELS):
+            if key == "cut":  # shown with the split options below
+                b = QRadioButton(label)
+                b.setToolTip(tip)
+                self.tool_group.addButton(b, k)
+                self.tool_buttons[key] = b
+                continue
             if k % 3 == 0:
                 row = QHBoxLayout()
                 gl_.addLayout(row)
@@ -133,7 +142,8 @@ class EditPanel(QWidget):
         g = QGroupBox("Edits")
         gl_ = QVBoxLayout(g)
         self.history = QListWidget()
-        self.history.setMinimumHeight(110)
+        self.history.setMinimumHeight(90)
+        self.history.setMaximumHeight(170)
         self.history.setToolTip("Every delete and restore, oldest first. They are saved in "
                                 "the project; the scan files are never changed.")
         gl_.addWidget(self.history)
@@ -149,6 +159,46 @@ class EditPanel(QWidget):
         row.addStretch(1)
         gl_.addLayout(row)
         lay.addWidget(g)
+
+        # ---- split into parts
+        g = QGroupBox("Split into parts")
+        gl_ = QVBoxLayout(g)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Split:"))
+        self.split_target = QComboBox()
+        self.split_target.setToolTip("What to cut in two: the whole site, or once it has "
+                                     "parts, one of them.")
+        row.addWidget(self.split_target, 1)
+        gl_.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("At height:"))
+        self.split_height = QDoubleSpinBox()
+        self.split_height.setRange(-1e6, 1e6)
+        self.split_height.setDecimals(2)
+        self.split_height.setSingleStep(0.1)
+        self.split_height.setSuffix(" m")
+        self.split_height.setToolTip("A level cut at this height (for floors of a building). "
+                                     "Colour by Height in the view helps to find it.")
+        self.split_height.valueChanged.connect(lambda _v: setattr(self, "_height_set", True))
+        self._height_set = False
+        row.addWidget(self.split_height)
+        self.b_split_h = QPushButton("Split here")
+        self.b_split_h.clicked.connect(self.split_at_height)
+        row.addWidget(self.b_split_h)
+        gl_.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(self.tool_buttons["cut"])
+        row.addStretch(1)
+        gl_.addLayout(row)
+        hint = QLabel("Parts are listed on the left: tick to show or hide them, double-click "
+                      "to rename, right-click to save one on its own. Undo joins them again.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(HINT_STYLE)
+        gl_.addWidget(hint)
+        lay.addWidget(g)
+
+        # ---- automatic clean-up (its options live with the merge in AlignPanel)
+        lay.addWidget(win.align_panel.cleanup_box)
 
         # ---- save
         self.b_save = QPushButton("Save cleaned cloud…")
@@ -169,6 +219,7 @@ class EditPanel(QWidget):
         if on:
             self.view.show_deleted = self.cb_show_deleted.isChecked()
             self._tool_toggled(self.tool_group.checkedId(), True)
+            self._default_height()
         else:
             self.regions, self.kinds = [], []
         self.refresh()
@@ -272,6 +323,39 @@ class EditPanel(QWidget):
     def _save(self):
         self.win.align_panel.merge()
 
+    # ---------------------------------------------------------------- splits
+
+    def _split_within(self):
+        """The part chosen to split (None: the whole site)."""
+        pid = self.split_target.currentData()
+        return self.doc.part(pid) if pid else None
+
+    def split_with(self, plane: HalfSpace, names) -> None:
+        within = self._split_within()
+        if self.doc.edits.parts and within is None:
+            return  # the site is already in parts: one of them must be chosen
+        if within is not None:
+            names = tuple(f"{within.name}: {n}" for n in names)
+        a, b = self.doc.split(plane, names, within)
+        self.win.tasks.set_status(f"Split into {a.name!r} and {b.name!r}. Untick one in the "
+                                  "list on the left to hide it.")
+
+    def split_at_height(self) -> None:
+        h = float(self.split_height.value())
+        self.split_with(HalfSpace([0, 0, 1], h), (f"above {h:.2f} m", f"below {h:.2f} m"))
+
+    def _default_height(self) -> None:
+        """Start the height half-way up the shown points (once per project)."""
+        if self._height_set:
+            return
+        zs = [self.view.project_points(i)[0][:, 2] for i, s in enumerate(self.doc.scans)
+              if s.entry.visible and len(s.sample)]
+        if zs:
+            z = np.concatenate(zs)
+            self.split_height.blockSignals(True)
+            self.split_height.setValue(float(np.median(z)))
+            self.split_height.blockSignals(False)
+
     # ---------------------------------------------------------------- state
 
     def edits_changed(self):
@@ -299,6 +383,17 @@ class EditPanel(QWidget):
         if self.history.count():
             self.history.scrollToBottom()
         self.align_note.setVisible(len(doc.scans) > 1 and not doc.aligned)
+        keep = self.split_target.currentData()
+        self.split_target.blockSignals(True)
+        self.split_target.clear()
+        if not st.parts:
+            self.split_target.addItem("The whole site", None)
+        for p in st.parts:
+            self.split_target.addItem(p.name, p.id)
+        chosen = self.win.project_panel.selected_part() or keep
+        k = self.split_target.findData(chosen) if chosen else -1
+        self.split_target.setCurrentIndex(max(k, 0))
+        self.split_target.blockSignals(False)
         self.update_buttons(self.win.tasks.busy if hasattr(self.win, "tasks") else False)
 
     def update_buttons(self, busy: bool):
@@ -309,6 +404,8 @@ class EditPanel(QWidget):
         self.b_clear.setEnabled(has_sel)
         self.b_undo.setEnabled(st.can_undo() and not busy)
         self.b_redo.setEnabled(st.can_redo() and not busy)
+        self.b_split_h.setEnabled(not busy and bool(self.doc.scans))
+        self.tool_buttons["cut"].setEnabled(bool(self.doc.scans))
         self.b_save.setEnabled(not busy and bool(self.doc.scans)
                                and (self.doc.aligned or len(self.doc.scans) == 1))
 

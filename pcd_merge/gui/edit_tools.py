@@ -210,5 +210,65 @@ class GrowTool(Tool):
         return bool(ev.buttons() & Qt.LeftButton)
 
 
+class CutTool(Tool):
+    """Drag a line across the view: the site (or the chosen part) is split
+    in two along the plane through that line and the view direction (in a
+    Top view: a vertical wall along the line)."""
+
+    name = "cut"
+    hint = "Drag a line to split along it (through the view direction)   Alt-drag: rotate"
+
+    def __init__(self, view, panel):
+        super().__init__(view, panel)
+        self.points: list[QPointF] = []
+
+    def press(self, ev):
+        self.points = [ev.position(), ev.position()]
+        return True
+
+    def move(self, ev):
+        if self.points and ev.buttons() & Qt.LeftButton:
+            self.points[1] = ev.position()
+            return True
+        return False
+
+    def release(self, ev):
+        if len(self.points) == 2:
+            a, b = self.points
+            if abs(a.x() - b.x()) + abs(a.y() - b.y()) >= 8:
+                plane = cut_plane(self.view.ndc(a), self.view.ndc(b), self.view.camera_mvp())
+                if plane is not None:
+                    self.panel.split_with(plane, ("Side A", "Side B"))
+        self.points = []
+        return True
+
+    def cancel(self):
+        self.points = []
+
+    def paint(self, painter):
+        if len(self.points) == 2:
+            painter.setPen(QPen(QColor(255, 90, 60), 1.6, Qt.DashLine))
+            painter.drawLine(self.points[0], self.points[1])
+
+
+def cut_plane(a_ndc, b_ndc, mvp):
+    """The plane through a line drawn on the screen and the view direction,
+    as a :class:`~pcd_merge.edits.HalfSpace` (None if it is degenerate)."""
+    from ..edits import HalfSpace
+
+    inv = np.linalg.inv(mvp)
+
+    def un(xy, z):
+        p = inv @ np.array([xy[0], xy[1], z, 1.0])
+        return p[:3] / p[3]
+
+    p0, p1, q0 = un(a_ndc, -0.5), un(a_ndc, 0.5), un(b_ndc, -0.5)
+    n = np.cross(p1 - p0, q0 - p0)
+    if not np.isfinite(n).all() or np.linalg.norm(n) < 1e-12:
+        return None
+    n = n / np.linalg.norm(n)
+    return HalfSpace(n, float(n @ p0))
+
+
 TOOLS = {"brush": BrushTool, "rectangle": RectangleTool, "lasso": LassoTool,
-         "object": GrowTool}
+         "object": GrowTool, "cut": CutTool}
