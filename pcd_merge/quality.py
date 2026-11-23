@@ -104,15 +104,20 @@ class QualityReport:
 
     @property
     def score(self) -> float:
-        """One number for comparing alignments of the same clouds (higher is
-        better): grade first, then the worst offset, then agreement."""
+        """One number for comparing alignments of the same clouds, graded
+        with the same voxel size (higher is better). The whole part is the
+        grade (2 Good, 1 Fair, 0 Poor); the fraction rewards a smaller offset
+        first, then more agreement, then more overlap (in 5% steps, so noise
+        doesn't decide)."""
         ps = [p for p in self.pairs if p.overlaps]
         if not ps:
             return 0.0
-        worst_offset = max(p.offset for p in ps) / self.voxel_size
+        offsets = [p.offset for p in ps]
+        worst = max(offsets) / self.voxel_size if all(np.isfinite(offsets)) else np.inf
         agreement = min(p.agreement for p in ps)
+        overlap = round(float(np.mean([p.overlap for p in ps])) / 0.05) * 0.05
         rank = 2 - GRADES.index(self.grade)
-        return rank + 0.5 / (1.0 + worst_offset) + 0.5 * agreement / 2
+        return rank + 0.45 / (1.0 + worst) + 0.3 * agreement + 0.2 * min(overlap, 1.0)
 
     def lines(self, names: list[str] | None = None) -> list[str]:
         """Plain-text summary for the report panel or a saved report."""

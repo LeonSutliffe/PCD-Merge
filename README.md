@@ -41,7 +41,8 @@ not be matched at all. In that case press **Retry**. Each press tries something
 different: a coarser voxel size (1.5×, then 2×, then 3× the first try) with
 more search attempts, which helps with repetitive or low-detail scenes. Every
 try is graded on the same scale as the first, and the best result so far is
-the one shown and merged. Press **Align** to start over.
+the one shown and merged: best grade first, then the smallest offset (see the
+quality report below), so moved objects can't make a worse alignment win. Press **Align** to start over.
 
 ## Install on Windows (no Python needed)
 
