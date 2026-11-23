@@ -21,6 +21,7 @@ Layout on disk::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -39,6 +41,7 @@ REPO = "LeonSutliffe/PCD-Merge"
 APP_NAME = "PCD Merge"
 EXE_NAME = "PCD Merge.exe"
 LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 ASSET_PATTERN = re.compile(r"windows.*\.zip$", re.IGNORECASE)
 
 ProgressFn = Callable[[int, int], None]  # (bytes done, bytes total)
@@ -96,6 +99,7 @@ class Release:
     size: int
     notes: str
     page: str
+    sha256: str = ""  # from the release asset's digest, when GitHub provides it
 
 
 def latest_release(timeout: float = 5.0) -> Release | None:
@@ -121,8 +125,14 @@ def release_from_json(data: dict) -> Release | None:
                 size=int(asset.get("size", 0)),
                 notes=data.get("body") or "",
                 page=data.get("html_url", ""),
+                sha256=_sha256_of(asset.get("digest") or ""),
             )
     return None
+
+
+def _sha256_of(digest: str) -> str:
+    algo, _, value = digest.partition(":")
+    return value.lower() if algo.lower() == "sha256" and len(value) == 64 else ""
 
 
 def check_for_update() -> Release | None:
@@ -137,19 +147,69 @@ def check_for_update() -> Release | None:
 # Staging a new version
 
 
-def download(url: str, dest: str, progress: ProgressFn | None = None) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "pcd-merge-updater"})
-    with urllib.request.urlopen(req, timeout=30) as r, open(dest, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            done += len(chunk)
-            if progress:
-                progress(done, total)
+class DownloadError(RuntimeError):
+    pass
+
+
+def download(url: str, dest: str, progress: ProgressFn | None = None,
+             expected_size: int = 0, sha256: str = "", attempts: int = 6) -> None:
+    """Download ``url`` to ``dest``, resuming if the connection drops.
+
+    Python's HTTP client ends a download silently when the connection is cut
+    part-way, which used to leave a truncated zip ("File is not a zip file").
+    So the size is checked against the server's (or ``expected_size``), short
+    downloads are resumed with an HTTP Range request, and the finished file is
+    checked against ``sha256`` when given.
+    """
+    total = expected_size
+    done = 0
+    open(dest, "wb").close()
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        if total and done >= total:
+            break
+        headers = {"User-Agent": "pcd-merge-updater"}
+        if done:
+            headers["Range"] = f"bytes={done}-"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers),
+                                        timeout=60) as r:
+                if done and r.status != 206:
+                    done = 0  # server ignored the Range request: start again
+                    open(dest, "wb").close()
+                if not total:
+                    length = int(r.headers.get("Content-Length") or 0)
+                    total = length + done if length else 0
+                with open(dest, "r+b" if done else "wb") as f:
+                    f.seek(done)
+                    f.truncate()
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        if progress:
+                            progress(done, total)
+            if not total:
+                break  # size unknown: trust the end of the stream
+        except Exception as e:  # network trouble: wait a moment and resume
+            last_error = e
+        if not (total and done >= total) and attempt + 1 < attempts:
+            time.sleep(min(2 ** attempt, 10))
+    if total and done != total:
+        raise DownloadError(
+            f"the download stopped at {done / 1e6:.0f} of {total / 1e6:.0f} MB "
+            f"({last_error or 'connection closed early'})")
+    if sha256:
+        h = hashlib.sha256()
+        with open(dest, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        if h.hexdigest() != sha256:
+            raise DownloadError("the downloaded file is damaged (checksum mismatch)")
+    if not zipfile.is_zipfile(dest):
+        raise DownloadError("the downloaded file is not a valid zip")
 
 
 def extract_app(zip_path: str, dest: str) -> None:
@@ -183,7 +243,7 @@ def stage_update(rel: Release, progress: ProgressFn | None = None) -> str:
     fd, zpath = tempfile.mkstemp(suffix=".zip", prefix="pcd-merge-")
     os.close(fd)
     try:
-        download(rel.url, zpath, progress)
+        download(rel.url, zpath, progress, expected_size=rel.size, sha256=rel.sha256)
         extract_app(zpath, staged)
     finally:
         try:

@@ -118,9 +118,29 @@ def _check_and_update(app: QApplication) -> bool:
         updater.launch_swap(sys.argv[1:])
         return True
     except Exception as e:
-        QMessageBox.warning(None, "PCD Merge", f"The update failed:\n{e}\n\n"
-                            "Carrying on with the current version.")
+        _update_failed(rel, e)
         return False
+
+
+def _update_failed(rel: "updater.Release", error: Exception) -> None:
+    """Explain the failure and offer the manual route: download the zip and
+    run the exe inside, which installs over the current copy."""
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle("PCD Merge")
+    box.setText(f"The update to {rel.version} failed:\n{error}\n\n"
+                "You can update by hand instead: download the zip, unzip it and run "
+                "PCD Merge.exe inside. It will install over this version and keep your "
+                "shortcut.\n\nFor now, PCD Merge carries on with the current version.")
+    b_open = box.addButton("Open download page", QMessageBox.AcceptRole)
+    box.addButton("Close", QMessageBox.RejectRole)
+    box.setDefaultButton(b_open)
+    box.exec()
+    if box.clickedButton() is b_open:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl(rel.page or updater.RELEASES_PAGE))
 
 
 def before_main_window(app: QApplication) -> bool:
