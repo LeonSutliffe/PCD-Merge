@@ -72,6 +72,11 @@ What it does not have, and what stops it being "more than an aligner":
   full-resolution cloud to disk. Inspect then streams it, so it can show more
   points than fit on the graphics card at full quality. The file is rebuilt
   when the edits change, and Inspect says when it is out of date.
+* **The viewing file is COPC** (Cloud Optimized Point Cloud, a standard LAZ
+  file with the octree built in), decided by Leon 2026-11-23 so clients can
+  open it without this app. It opens in free tools such as CloudCompare, QGIS
+  and web viewers that read COPC, and it is still an ordinary LAZ file for any
+  LAS software. Measurements go in a small JSON file next to it.
 
 ## The modes in detail
 
@@ -112,7 +117,9 @@ Acting on a selection:
 * **Delete** (stored as a mask, undoable), **Restore** deleted points.
 * **Split**: draw a line in a top or side view, or place a plane, and cut the
   scans into two parts. Each part becomes its own item in the project that can
-  be shown, hidden, exported or deleted (e.g. split a building into floors).
+  be shown, hidden, exported (as its own file) or deleted, e.g. split a
+  building into floors. The original scans stay whole; a part is just a
+  region (decided by Leon 2026-11-23).
 * **Crop to selection / box**: keep only the region.
 * Automatic clean-up (dedup, noise, moving objects) with its live preview.
 
@@ -208,7 +215,7 @@ Rules:
 | Lasso, rectangle and box selection | Edit | Mass selecting and deleting. |
 | Split along a line or plane into parts | Edit | Leon's ask; also floors, wings, crop. |
 | Undo / redo | Edit | Expected once users can delete. |
-| Prepared viewing file with streaming full-quality view | Inspect | Full quality on building-sized scans. |
+| Prepared viewing file (COPC) with streaming full-quality view | Inspect | Full quality on building-sized scans, and clients can open it without the app. |
 | Click-to-measure in 3D (distance, height, coordinates), saved | Inspect | Leon's ask. |
 | Export the edited cloud (with spacing, format) | Align | Today's merge, now with the edits applied. |
 | Code signing (or a decision not to) | - | SmartScreen's "Run anyway" looks broken to new users. |
@@ -224,7 +231,7 @@ Rules:
 | Change detection between two visits of the same site | The moved-objects logic already exists; showing "what's new / gone" in colour is a short step and a strong selling point. |
 | Report export (HTML/PDF): scans, quality grade, heat map, measurements, sections, notes | Something to hand over or file. |
 | Sections (slices) shown flat, export PNG/DXF | The basis of floor plans and elevations. |
-| Viewer-only launch: open a viewing file read-only, for clients | Inspect mode is already read-only, so this is mostly packaging. |
+| Free "PCD Merge Viewer": Inspect mode only, a small separate download for clients, opens COPC files and shows saved measurements | Clients get our walk-through and measuring, not just a generic viewer. |
 | Walk-on-floor mode (gravity + collision) in the walk-through | Feels like walking the building. |
 | Sample project in the installer and a first-run tour | Lets a new user see the workflow in 2 minutes. |
 
@@ -256,22 +263,28 @@ Parallel PRs have been clashing on `gui.py`; the 0.9 layout change should split
 it into one module per mode and panel so later features can be built side by
 side.
 
+## Decided (2026-11-23)
+
+* Three modes: Align, Edit, Inspect (Leon's structure), with all the
+  additions above (clean-up in Edit, full-resolution deletes, extra selection
+  tools, colour by alignment error, prepared viewing file, measuring in Edit).
+* Clients must be able to open the Inspect file without the app: COPC.
+* A split creates parts of the project, not new scans.
+
 ## Open questions for Leon
 
 1. **Who uses it, and what do they hand over?** A clean cloud for other
    software, measurements, floor plans, notes with photos, or a comparison
    between visits? This decides what comes after 1.0.
-2. **Should the Inspect viewing file be viewable outside the app?** For
-   example a read-only viewer you can give a client, or a web viewer. If yes,
-   its format should be chosen with that in mind (an open format like COPC
-   LAZ, which other viewers read, rather than our own).
-3. **Is automatic clean-up moving from Align to Edit OK?** Recommended, so all
-   point removal is in one place.
-4. **Does a split create separate scans or just parts of the project?**
-   Recommended: parts that export as separate files, while the original scans
-   stay whole.
-5. **Code signing.** A certificate costs roughly a few hundred dollars a year
-   (Azure Trusted Signing is cheaper). Worth it if people other than you will
-   install it.
-6. **Scan sizes to design for.** How many scans and points in your biggest
+2. **Code signing.** A certificate costs roughly a few hundred dollars a year
+   (Azure Trusted Signing is cheaper). More relevant now that clients may
+   install the viewer.
+3. **Scan sizes to design for.** How many scans and points in your biggest
    site? It sets how hard the streaming and level-of-detail work needs to be.
+
+## Technical risk to check first
+
+Writing COPC: laspy reads COPC but does not write it. The options are our own
+octree writer on top of laspy/lazrs (the format is documented and the
+walk-through already builds a similar grid), or bundling PDAL/untwine (large
+on Windows). A short spike at the start of 0.11 should decide.
