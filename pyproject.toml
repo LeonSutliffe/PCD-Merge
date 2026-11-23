@@ -23,14 +23,14 @@ dependencies = [
 # Fast reading/writing of binary_compressed PCD files. Without it a slower
 # pure-Python decoder is used for reading.
 fast = ["python-lzf>=0.2.4"]
-test = ["pytest>=7", "python-lzf>=0.2.4"]
+test = ["pytest>=7", "pytest-qt>=4", "python-lzf>=0.2.4"]
 build = ["pyinstaller>=6", "python-lzf>=0.2.4"]
 
 [project.scripts]
 pcd-merge = "pcd_merge.cli:main"
 
 [tool.setuptools]
-packages = ["pcd_merge"]
+packages = ["pcd_merge", "pcd_merge.gui"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pcd_merge.__version__" }

@@ -63,6 +63,8 @@ class PointCloud:
 
     @property
     def name(self) -> str:
+        if self.extra.get("name"):  # e.g. one scan of a multi-scan E57 file
+            return self.extra["name"]
         return os.path.basename(self.path) if self.path else "cloud"
 
     @property

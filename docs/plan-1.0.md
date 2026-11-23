@@ -1,7 +1,8 @@
 # PCD Merge 1.0: feature set and how the app works
 
-Status: proposal for Leon to decide on (2026-11-23), restructured around
-Leon's three modes. No code yet.
+Status: approved by Leon (2026-11-23). 0.9 built 2026-11-23: input formats,
+streamed merge/export, the `.pcdproj` project folder and the new layout with
+mode tabs (PR #17). Next: 0.10, Edit mode.
 
 ## Where we are (0.8.0)
 
@@ -263,7 +264,11 @@ Rules:
 
 1. **0.9: foundation.** Project file, input formats, mode tabs and the new
    layout with today's features moved into Align, walk-through inside the
-   main view. Everything that works today must still work.
+   main view. Everything that works today must still work. *Built (PR #17).*
+   Also in: merge and export stream scans to disk a chunk at a time when no
+   clean-up or thinning is asked for. Still in memory, for 0.10/0.11: clean-up,
+   min spacing, alignment input and the walk-through (all work on whole
+   scans), and lock-a-scan (comes with manual alignment in 0.11).
 2. **0.10: Edit mode.** Selection tools, delete/restore, undo, split, auto
    clean-up moved here, colour by alignment error.
 3. **0.11: Inspect mode.** Prepared viewing file and streaming, measuring.

@@ -232,3 +232,68 @@ def _copy_transformed(src: np.ndarray, out: np.ndarray, sl: slice, t: np.ndarray
             dst[sl] = src[name].view(dtype[name])
         else:
             dst[sl] = src[name]
+
+
+# --------------------------------------------------------------------------
+# Out-of-core merging: nothing bigger than one chunk is ever held in memory.
+
+
+def stream_source_ids(sources) -> list[int | None]:
+    """:func:`source_ids` for :class:`~pcd_merge.readers.ScanSource` objects.
+    Reads only the ``source`` column of scans that have one."""
+    next_id = 0
+    for s in sources:
+        if "source" in s.dtype.names:
+            for chunk in s.chunks():
+                if len(chunk):
+                    next_id = max(next_id, int(np.nanmax(chunk["source"])) + 1)
+    out: list[int | None] = []
+    for s in sources:
+        if "source" in s.dtype.names:
+            out.append(None)
+        else:
+            out.append(next_id)
+            next_id += 1
+    return out
+
+
+class StreamedMerge:
+    """The merged cloud of several scans as a stream of chunks.
+
+    ``dtype`` and ``missing`` are as for :func:`merge_clouds`. Iterating
+    yields the transformed points of each scan in turn, a chunk at a time, in
+    the merged layout. ``written[k]`` counts the points scan ``k`` gave in
+    the last full pass (finite points only). Iterate as often as needed:
+    every pass reads the scans again.
+    """
+
+    def __init__(self, sources, transforms, add_source_field: bool = False):
+        if len(sources) != len(transforms):
+            raise ValueError("one transform per cloud is required")
+        self.sources = list(sources)
+        self.transforms = [np.asarray(t, dtype=np.float64) for t in transforms]
+        dtype, missing = _merged_dtype([s.dtype for s in self.sources])
+        has_source = "source" in dtype.names
+        if add_source_field and not has_source:
+            dtype = np.dtype(dtype.descr + [("source", "<u2")])
+        if has_source and "source" in missing:
+            missing.remove("source")
+        self.dtype, self.missing = dtype, missing
+        self.numbered = add_source_field or has_source
+        self.ids = stream_source_ids(self.sources) if self.numbered else [None] * len(self.sources)
+        self.total = sum(s.count for s in self.sources)  # upper bound (before dropping NaNs)
+        self.written = [0] * len(self.sources)
+
+    def __iter__(self):
+        self.written = [0] * len(self.sources)
+        for k, (s, t) in enumerate(zip(self.sources, self.transforms)):
+            for src in s.chunks(_CHUNK):
+                ok = np.isfinite(src["x"]) & np.isfinite(src["y"]) & np.isfinite(src["z"])
+                if not ok.all():
+                    src = src[ok]
+                out = np.zeros(len(src), dtype=self.dtype)
+                _copy_transformed(src, out, slice(0, len(src)), t, self.dtype)
+                if self.numbered and self.ids[k] is not None:
+                    out["source"] = self.ids[k]
+                self.written[k] += len(src)
+                yield out

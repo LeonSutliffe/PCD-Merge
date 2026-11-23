@@ -97,6 +97,7 @@ class FlyView(QOpenGLWidget):
         self.px_target, self.max_budget = DETAIL[DEFAULT_DETAIL]
         self.budget = self.max_budget
         self.on_status = on_status
+        self.on_escape = None  # set when embedded: Esc leaves the walk-through
         self.error: str | None = None
 
         self._keys: set[int] = set()
@@ -335,6 +336,8 @@ class FlyView(QOpenGLWidget):
         if key == Qt.Key_Escape:
             if self._locked:
                 self._unlock()
+            elif self.on_escape is not None:
+                self.on_escape()
             else:
                 self.window().close()
             return
@@ -419,13 +422,17 @@ class FlyView(QOpenGLWidget):
 
 
 class FlyThroughWindow(QWidget):
-    """Top-level window around a :class:`FlyView`, with its settings."""
+    """A :class:`FlyView` with its settings: a window of its own, or, with
+    ``on_exit``, a panel embedded in the main window's 3D view (Esc and the
+    "Leave" button call ``on_exit``)."""
 
-    def __init__(self, scene: Scene, title: str = "Fly-through", parent=None):
-        super().__init__(parent, Qt.Window)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-        self.setWindowTitle(title)
-        self.resize(1280, 800)
+    def __init__(self, scene: Scene, title: str = "Fly-through", parent=None, on_exit=None):
+        super().__init__(parent, Qt.Widget if on_exit else Qt.Window)
+        self.embedded = on_exit is not None
+        if not self.embedded:
+            self.setAttribute(Qt.WA_DeleteOnClose)
+            self.setWindowTitle(title)
+            self.resize(1280, 800)
         self.scene = scene
 
         lay = QVBoxLayout(self)
@@ -463,6 +470,10 @@ class FlyThroughWindow(QWidget):
                               "Ctrl for 4x slower.")
         self.speed.valueChanged.connect(lambda v: self.view.set_speed(v))
         top.addWidget(self.speed)
+        if self.embedded:  # narrower: the main window has side panels
+            top.addStretch(1)
+            lay.addLayout(top)
+            top = QHBoxLayout()
         self.follow = QCheckBox("Fly where I look")
         self.follow.setToolTip("Off: W/S move level, like walking, and Space/C go up and "
                                "down. On: W flies in the direction you are looking.")
@@ -481,9 +492,17 @@ class FlyThroughWindow(QWidget):
         b_start.setToolTip("Home key")
         b_start.clicked.connect(lambda: (self.view.go_to_start(), self.view.setFocus()))
         top.addWidget(b_start)
+        if self.embedded:
+            b_leave = QPushButton("Leave walk-through")
+            b_leave.setToolTip("Back to the orbit view (Esc)")
+            b_leave.clicked.connect(on_exit)
+            top.addWidget(b_leave)
         lay.addLayout(top)
 
         self.view = FlyView(scene, self, on_status=self._status)
+        if self.embedded:
+            self.view.on_escape = on_exit
+            lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.view, 1)
 
         bottom = QHBoxLayout()
@@ -512,7 +531,8 @@ class FlyThroughWindow(QWidget):
                               "Shift: faster   Wheel: speed   Esc: release the mouse")
         else:
             self.help.setText("Click the view to look around with the mouse (or drag)   "
-                              "W A S D: move   Space/C: up/down   Home: start   Esc: close")
+                              "W A S D: move   Space/C: up/down   Home: start   Esc: "
+                              + ("leave" if self.embedded else "close"))
         shown = len(self.scene)
         txt = f"{view._drawn / 1e6:.1f} M of {shown / 1e6:.1f} M points drawn"
         if self.scene.total_points > shown:
@@ -554,7 +574,10 @@ class FlyThroughWindow(QWidget):
             QMessageBox.critical(self, "Fly-through",
                                  "The 3D view could not be drawn on this computer's graphics "
                                  f"card.\n\n{self.view.error}")
-            self.close()
+            if self.embedded:
+                self.view.on_escape()
+            else:
+                self.close()
 
     def closeEvent(self, e):
         self.view.release_gl()

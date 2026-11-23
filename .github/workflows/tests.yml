@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: System libraries for Open3D
-        run: sudo apt-get install -y --no-install-recommends libegl1 libgl1 libgomp1 || (sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libgomp1)
+        run: sudo apt-get install -y --no-install-recommends libegl1 libgl1 libgomp1 libxkbcommon0 libfontconfig1 libdbus-1-3 || (sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libgomp1 libxkbcommon0 libfontconfig1 libdbus-1-3)
 
       # The whole environment (Open3D, PySide6, ...) is cached and only rebuilt
       # when the dependencies in pyproject.toml / requirements.txt change.
