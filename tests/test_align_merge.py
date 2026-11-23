@@ -100,3 +100,18 @@ def test_cli_end_to_end(tmp_path, scans):
     m = read_pcd(out)
     assert len(m) == len(scans[0]) + len(scans[1])
     assert m.field_names == ("x", "y", "z", "intensity", "ring")
+
+
+def test_cli_exports_las_thinned(tmp_path, scans):
+    laspy = pytest.importorskip("laspy")
+    paths = []
+    for i, s in enumerate(scans[:2]):
+        p = str(tmp_path / f"scan{i}.pcd")
+        write_pcd(p, s)
+        paths.append(p)
+    out = str(tmp_path / "merged.laz")
+    assert main(paths + ["-o", out, "--seed", "4", "--min-spacing", "0.2"]) == 0
+    las = laspy.read(out)
+    assert 0 < len(las.points) < len(scans[0]) + len(scans[1])
+    assert "ring" in las.point_format.extra_dimension_names
+    assert main(paths + ["-o", str(tmp_path / "merged.xyz")]) == 2

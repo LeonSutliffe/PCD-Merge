@@ -2,7 +2,7 @@
 
 A desktop program for LiDAR point clouds: drag in two or more `.pcd` files, it
 aligns them automatically, shows you the result in 3D, and on your OK merges
-them into a single `.pcd` file.
+them into a single file (PCD, PLY, LAS/LAZ or E57).
 
 ![PCD Merge after aligning three scans](docs/screenshot.png)
 
@@ -84,7 +84,29 @@ pcd-merge            # or: python -m pcd_merge
 2. Press **Align**. The view switches to *Aligned*, each cloud in its own colour.
 3. Check the result. Untick a file in the list to hide it.
 4. **Accept and merge...** writes the merged file, or **Retry** to try again.
+   Pick the format in the save dialog (see *Output formats* below).
    **Save transforms...** writes the 4x4 matrices as JSON.
+
+To make the output smaller, set **Min. point spacing** (in the scans' units,
+e.g. `0.02` for 2 cm). The merged cloud is then thinned so no two points are
+closer than that. Original points are kept, not averaged, so intensity and the
+other fields stay exactly as measured. The default, *Full resolution*, saves
+every point.
+
+### Output formats
+
+| Format | Opens in | What is kept |
+| --- | --- | --- |
+| `.pcd` | PCL, CloudCompare, ROS | every field |
+| `.ply` | CloudCompare, MeshLab, Blender | every field (`rgb` becomes red/green/blue, normals become nx/ny/nz) |
+| `.las` / `.laz` | survey and GIS software, CloudCompare | intensity, colour, GPS time (from `timestamp`/`time`/`t`), `source` as point source ID; every other field as a LAS extra field |
+| `.e57` | Recap, Cyclone, Scene, CloudCompare | coordinates (double precision), intensity, colour, time stamp; other fields are left out |
+
+LAS stores intensity as whole numbers 0-65535. Integer intensities are stored
+as they are; fractional ones (e.g. 0-1 floats) are rescaled to the full 16-bit
+range and the exact values are also kept in an `intensity_raw` extra field.
+LAS coordinates are stored at 0.1 mm resolution. The app tells you after saving
+if anything could not be stored in the chosen format.
 
 Voxel size is *Automatic* by default (about 40,000 points per thinned cloud).
 Set it by hand, in the scans' units, if alignment fails: larger is more robust
@@ -94,10 +116,12 @@ and faster, smaller is more precise. It never affects which points are merged.
 
 ```bash
 pcd-merge scan1.pcd scan2.pcd scan3.pcd -o merged.pcd --transforms transforms.json
+pcd-merge scan1.pcd scan2.pcd -o merged.laz --min-spacing 0.02
 ```
 
-Options: `--voxel 0.3`, `--seed 1` (repeatable runs), `--source-field` (adds a
-`source` field telling which file each point came from), `--compressed`, and
+The output extension picks the format (`.pcd`, `.ply`, `.las`, `.laz`, `.e57`).
+Options: `--voxel 0.3`, `--min-spacing 0.02` (thin the output), `--seed 1` (repeatable runs), `--source-field` (adds a
+`source` field telling which file each point came from), `--compressed` (PCD only), and
 `--force` (merge even if some cloud could not be aligned).
 
 ## Limits and next steps

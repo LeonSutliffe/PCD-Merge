@@ -30,6 +30,13 @@ def _keep(entry):
 
 
 datas = [e for e in datas if _keep(e)]
+# Export libraries: laspy (LAS), lazrs (LAZ compression, Rust extension) and
+# pye57 (E57, C++ extension with its Xerces DLL).
+for pkg in ("laspy", "lazrs", "pye57"):
+    d, b, h = collect_all(pkg)
+    datas += d
+    binaries += b
+    hiddenimports += h
 binaries = [e for e in binaries if _keep(e)]
 hiddenimports = [h for h in hiddenimports if not h.startswith(("open3d.ml", "open3d._ml3d"))]
 hiddenimports += ["lzf", "pyqtgraph.opengl", "OpenGL.platform.win32", "OpenGL.arrays.numpymodule"]
