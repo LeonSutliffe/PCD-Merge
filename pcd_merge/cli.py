@@ -28,6 +28,15 @@ def _parse(argv):
     p.add_argument("--transforms", help="write the estimated 4x4 transforms to this JSON file")
     p.add_argument("--source-field", action="store_true",
                    help="add a 'source' field saying which file each point came from")
+    g = p.add_argument_group("merge clean-up (all off by default; only ever removes points)")
+    g.add_argument("--dedup", nargs="?", type=float, const=0.0, default=None, metavar="CELL",
+                   help="where scans overlap, keep only the densest scan's points in each "
+                   "CELL-sized cube (default cell: automatic)")
+    g.add_argument("--denoise", action="store_true",
+                   help="remove isolated noise points (dust, rain, stray returns)")
+    g.add_argument("--remove-moving", action="store_true",
+                   help="remove people, cars etc. that another scan saw through "
+                   "(needs scans in their scanner's own frame)")
     p.add_argument("--compressed", action="store_true",
                    help="write binary_compressed PCD (PCD output only)")
     p.add_argument("--min-spacing", type=float, default=None, metavar="D",
@@ -51,8 +60,9 @@ def main(argv=None) -> int:
 
         return run()
 
+    from .cleanup import CleanupOptions
     from .exporters import format_of, write_cloud
-    from .merge import merge_clouds
+    from .merge import merge_clouds_with_stats
     from .pcd_io import read_pcd
     from .registration import AlignSettings, align
 
@@ -109,7 +119,14 @@ def main(argv=None) -> int:
         print("error: not all clouds could be aligned; not merging (use --force to merge anyway)",
               file=sys.stderr)
         return 1
-    merged, partial = merge_clouds(clouds, result.transforms, add_source_field=args.source_field)
+    cleanup = CleanupOptions(dedup=args.dedup is not None, dedup_cell=args.dedup or None,
+                             denoise=args.denoise, remove_moving=args.remove_moving)
+    merged, partial, stats = merge_clouds_with_stats(
+        clouds, result.transforms, add_source_field=args.source_field, cleanup=cleanup,
+        progress=progress)
+    if stats is not None:
+        for line in stats.lines([c.name for c in clouds]):
+            print(line)
     if partial:
         print("note: fields missing from some files were filled with 0:", ", ".join(partial))
     if args.min_spacing:
