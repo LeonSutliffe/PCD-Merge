@@ -18,9 +18,17 @@ them into a single file (PCD, PLY, LAS/LAZ or E57).
   ground) is set aside when matching and scoring, because flat ground looks the
   same everywhere and otherwise produces convincing but wrong alignments. It is
   still used by ICP to get height and tilt exactly right.
-* **Three or more clouds:** every pair is registered, the most reliable pairs
+* **Three or more clouds:** pairs are registered, the most reliable pairs
   form a pose graph, and the graph is optimised so all clouds agree with each
-  other. The first file is the reference frame.
+  other. The first file is the reference frame. A pair only counts if its
+  walls, poles and objects line up, not just its ground.
+* **Whole sites (more than 6 scans):** instead of trying every pair, each scan
+  is matched with the next one in file order (scanners usually number files in
+  capture order), then scans that are still on their own are matched against
+  the rest until everything is connected, and finally every pair that now sits
+  side by side gets an extra quick ICP check (a loop closure) so small errors
+  do not pile up along a long chain. Files that match nothing, such as a scan
+  from another site, are reported and can be left out of the merge.
 * **Merging uses every original point.** The transforms are applied to the
   full-resolution files, and all per-point fields (intensity, ring, timestamp,
   normals, colour, ...) are kept. Normals are rotated along with the points.
@@ -79,7 +87,7 @@ On Linux, Open3D needs `libegl1 libgl1 libgomp1` from your package manager.
 pcd-merge            # or: python -m pcd_merge
 ```
 
-1. Drag `.pcd` files (or a folder of them) onto the window.
+1. Drag `.pcd` files, or a whole folder (subfolders included), onto the window.
    *Original positions* shows the scans as they are in the files.
 2. Press **Align**. The view switches to *Aligned*, each cloud in its own colour.
 3. Check the result. Untick a file in the list to hide it. The quality report
@@ -87,6 +95,18 @@ pcd-merge            # or: python -m pcd_merge
 4. **Accept and merge...** writes the merged file, or **Retry** to try again.
    Pick the format in the save dialog (see *Output formats* below).
    **Save transforms...** writes the 4x4 matrices and the quality report as JSON.
+
+If some clouds could not be aligned, merging asks whether to leave them out or
+merge them in their original position.
+
+**Adding new scans later.** Press **Add new scans to an existing merged
+cloud…** and pick a merged `.pcd` file you saved earlier, then add the new scans (or
+the whole site folder again) and press **Align**. The merged cloud stays
+exactly where it is; the new scans are aligned to it and appended when you
+merge. Every merge writes `merged.pcd.json` next to the file with the list of
+scans in it and their transforms, so scans that are already in it are skipped
+automatically. If the merged cloud has a `source` field, the new scans get the
+next numbers.
 
 To make the output smaller, set **Min. point spacing** (in the scans' units,
 e.g. `0.02` for 2 cm). The merged cloud is then thinned so no two points are
@@ -169,13 +189,21 @@ pcd-merge scan1.pcd scan2.pcd scan3.pcd -o merged.pcd --transforms transforms.js
 pcd-merge scan1.pcd scan2.pcd -o merged.laz --min-spacing 0.02
 ```
 
+Folders work too: `pcd-merge site_scans/ -o merged.pcd`. To add new scans to
+an earlier result (the existing merged cloud must be a `.pcd`):
+
+```bash
+pcd-merge --add-to merged.pcd new_scans/ -o merged.pcd
+```
+
 The output extension picks the format (`.pcd`, `.ply`, `.las`, `.laz`, `.e57`).
-Options: `--voxel 0.3`, `--min-spacing 0.02` (thin the output), `--seed 1` (repeatable runs), `--source-field` (adds a
-`source` field telling which file each point came from), `--compressed` (PCD only), and
-`--force` (merge even if some cloud could not be aligned). Clean-up:
-`--dedup` (or `--dedup 0.1` to set the cell size), `--denoise`,
-`--remove-moving`.
-The quality report is printed after alignment.
+Options: `--voxel 0.3`, `--min-spacing 0.02` (thin the output), `--seed 1`
+(repeatable runs), `--source-field` (adds a `source` field telling which file
+each point came from), `--compressed` (PCD only), `--skip-unaligned` (leave out
+clouds that could not be aligned) and `--force` (merge them anyway, in their
+original position). Clean-up: `--dedup` (or `--dedup 0.1` to set the cell
+size), `--denoise`, `--remove-moving`. The quality report is printed after
+alignment.
 
 ## Limits and next steps
 

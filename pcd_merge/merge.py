@@ -64,6 +64,28 @@ def _merged_dtype(dtypes: list[np.dtype]) -> tuple[np.dtype, list[str]]:
     return np.dtype(fields), missing
 
 
+def source_ids(clouds: list[PointCloud]) -> list[int | None]:
+    """The ``source`` value each cloud's points get in the merged file.
+
+    Clouds that already have a ``source`` field (an earlier merge result)
+    keep their values and get ``None`` here; the others are numbered after
+    the highest existing value, in order. With no existing field this is
+    simply 0, 1, 2, ...
+    """
+    next_id = 0
+    for c in clouds:
+        if c.has_field("source") and len(c):
+            next_id = max(next_id, int(np.nanmax(c.data["source"])) + 1)
+    out: list[int | None] = []
+    for c in clouds:
+        if c.has_field("source"):
+            out.append(None)
+        else:
+            out.append(next_id)
+            next_id += 1
+    return out
+
+
 def sensor_origin(cloud: PointCloud, t: np.ndarray) -> np.ndarray:
     """Where the scanner was, in the merged frame (from the PCD VIEWPOINT,
     which is the scan origin for raw scans)."""
@@ -82,8 +104,12 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
     partially-present fields so the caller can warn about them.
 
     ``add_source_field`` adds a ``source`` field (U2) holding the index of the
-    file each point came from. ``progress(message, fraction)`` is called as
-    the work goes on.
+    file each point came from. If a cloud already has a ``source`` field (it
+    is an earlier merge result being added to), that numbering is continued
+    for the new clouds whether or not ``add_source_field`` is set; see
+    :func:`source_ids`.
+
+    ``progress(message, fraction)`` is called as the work goes on.
 
     Without clean-up, points are transformed in chunks straight into the
     output array, so the only full-size allocation is the merged result.
@@ -104,7 +130,8 @@ def merge_clouds_with_stats(clouds, transforms, add_source_field=False, cleanup=
     if len(clouds) != len(transforms):
         raise ValueError("one transform per cloud is required")
     if cleanup is None or not cleanup.any:
-        out, missing = _stream_merge(clouds, transforms, add_source_field, progress)
+        out, missing = _stream_merge(clouds, transforms, add_source_field, progress,
+                                     source_ids(clouds))
         return out, missing, None
     if progress:
         progress("Applying transforms to full-resolution clouds", 0.0)
@@ -115,16 +142,19 @@ def merge_clouds_with_stats(clouds, transforms, add_source_field=False, cleanup=
 
         origins = [sensor_origin(c, t) for c, t in zip(clouds, transforms)]
         parts, stats = clean(parts, origins, cleanup, progress)
-    out, missing = _concat(parts, add_source_field)
+    out, missing = _concat(parts, add_source_field, source_ids(clouds))
     return out, missing, stats
 
 
-def _concat(parts: list[np.ndarray], add_source_field: bool) -> tuple[np.ndarray, list[str]]:
+def _concat(parts: list[np.ndarray], add_source_field: bool,
+            ids: list[int | None]) -> tuple[np.ndarray, list[str]]:
     dtype, missing = _merged_dtype([p.dtype for p in parts])
-    if add_source_field:
-        if "source" in dtype.names:
-            raise ValueError("clouds already have a 'source' field")
+    has_source = "source" in dtype.names
+    if add_source_field and not has_source:
         dtype = np.dtype(dtype.descr + [("source", "<u2")])
+    if has_source and "source" in missing:
+        missing.remove("source")
+    number = add_source_field or has_source
 
     total = sum(len(p) for p in parts)
     out = np.zeros(total, dtype=dtype)
@@ -136,19 +166,21 @@ def _concat(parts: list[np.ndarray], add_source_field: bool) -> tuple[np.ndarray
                 out[name][sl] = p[name].view(dtype[name])
             else:
                 out[name][sl] = p[name]
-        if add_source_field:
-            out["source"][sl] = k
+        if number and ids[k] is not None:
+            out["source"][sl] = ids[k]
         pos += len(p)
     return out, missing
 
 
-def _stream_merge(clouds, transforms, add_source_field, progress):
+def _stream_merge(clouds, transforms, add_source_field, progress, ids):
     """Transform and join clouds chunk by chunk straight into the output."""
     dtype, missing = _merged_dtype([c.data.dtype for c in clouds])
-    if add_source_field:
-        if "source" in dtype.names:
-            raise ValueError("clouds already have a 'source' field")
+    has_source = "source" in dtype.names
+    if add_source_field and not has_source:
         dtype = np.dtype(dtype.descr + [("source", "<u2")])
+    if has_source and "source" in missing:
+        missing.remove("source")
+    number = add_source_field or has_source
 
     masks = [c.finite_mask() for c in clouds]
     counts = [int(m.sum()) for m in masks]
@@ -165,8 +197,8 @@ def _stream_merge(clouds, transforms, add_source_field, progress):
                 src = src[m[start : start + _CHUNK]]
             sl = slice(pos, pos + len(src))
             _copy_transformed(src, out, sl, t, dtype)
-            if add_source_field:
-                out["source"][sl] = k
+            if number and ids[k] is not None:
+                out["source"][sl] = ids[k]
             pos += len(src)
             if progress:
                 progress(msg, pos / max(1, total))

@@ -38,13 +38,12 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .cleanup import CleanupOptions
-from .exporters import FORMATS, file_filter, write_cloud
-from .merge import merge_clouds_with_stats
+from .exporters import FORMATS, file_filter
+from .files import already_merged, find_pcd_files, read_manifest, save_merged
 from .pcd_io import PointCloud, read_pcd
 from .quality import (NO_OVERLAP, QualityReport, assess, colour_stops, error_colours,
                       fmt_distance)
 from .registration import AlignResult, AlignSettings, align
-from .thinning import thin
 
 try:
     import pyqtgraph.opengl as gl
@@ -175,26 +174,15 @@ def _legend_pixmap(width=160, height=12) -> QPixmap:
     return pm
 
 
-def _merge_and_save(clouds, transforms, path, add_source, compressed, spacing, cleanup,
-                    progress):
-    def merge_progress(msg, frac):
-        progress(msg, 0.5 * frac)
-
-    merged, partial, stats = merge_clouds_with_stats(
-        clouds, transforms, add_source_field=add_source, cleanup=cleanup,
-        progress=merge_progress)
-    notes = stats.lines([c.name for c in clouds]) if stats is not None else []
-    if spacing:
-        progress(f"Thinning {len(merged):,} points to {spacing:g} spacing", 0.5)
-        before = len(merged)
-        merged = thin(merged, spacing)
-        notes.append(f"thinned to a minimum spacing of {spacing:g}: kept {len(merged):,} "
-                     f"of {before:,} points ({len(merged) / max(before, 1):.0%})")
-    msg = f"Writing {len(merged):,} points to {os.path.basename(path)}"
-    progress(msg, 0.6)
-    notes += write_cloud(path, merged, compressed=compressed,
-                         progress=lambda f: progress(msg, 0.6 + 0.4 * f))
-    return path, len(merged), partial, notes
+def _merge_and_save(clouds, transforms, path, include, add_source, compressed, spacing,
+                    cleanup, base_path, voxel_size, progress):
+    n, partial, notes, stats = save_merged(
+        clouds, transforms, path, include, add_source=add_source, compressed=compressed,
+        base_path=base_path, voxel_size=voxel_size, min_spacing=spacing, cleanup=cleanup,
+        progress=progress)
+    if stats is not None:
+        notes = stats.lines([c.name for c, inc in zip(clouds, include) if inc]) + notes
+    return path, n, partial, notes, include
 
 
 # --------------------------------------------------------------------------
@@ -217,12 +205,16 @@ class MainWindow(QMainWindow):
         self._worker: _Worker | None = None
         self._items = []
         self._origin = np.zeros(3)
+        # Set when cloud 0 is an existing merged cloud that new scans are added to.
+        self.base_path: str | None = None
+        self._loading_base = False
 
         # ---- left panel
         left = QWidget()
         lv = QVBoxLayout(left)
 
-        self.drop_hint = QLabel("Drag and drop two or more .pcd files here\n(or use Add files…)")
+        self.drop_hint = QLabel("Drag and drop two or more .pcd files, or a whole folder,\n"
+                                "here (or use Add files…)")
         self.drop_hint.setAlignment(Qt.AlignCenter)
         self.drop_hint.setStyleSheet(
             "QLabel { border: 2px dashed #888; border-radius: 8px; padding: 18px; color: #666; }"
@@ -236,13 +228,23 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         b_add = QPushButton("Add files…")
         b_add.clicked.connect(self._add_dialog)
+        b_folder = QPushButton("Add folder…")
+        b_folder.setToolTip("Add every .pcd file in a folder and its subfolders.")
+        b_folder.clicked.connect(self._add_folder_dialog)
         self.b_remove = QPushButton("Remove")
         self.b_remove.clicked.connect(self._remove_selected)
         b_clear = QPushButton("Clear")
         b_clear.clicked.connect(self._clear)
-        for b in (b_add, self.b_remove, b_clear):
+        for b in (b_add, b_folder, self.b_remove, b_clear):
             row.addWidget(b)
         lv.addLayout(row)
+
+        self.b_base = QPushButton("Add new scans to an existing merged cloud…")
+        self.b_base.setToolTip(
+            "Pick a merged .pcd you saved earlier. It stays exactly where it is and the "
+            "other files in the list are aligned to it and appended when you merge.")
+        self.b_base.clicked.connect(self._base_dialog)
+        lv.addWidget(self.b_base)
 
         box = QGroupBox("Alignment")
         form = QFormLayout(box)
@@ -467,6 +469,7 @@ class MainWindow(QMainWindow):
         self.b_merge.setEnabled(not busy and self.result is not None)
         self.b_save_tf.setEnabled(not busy and self.result is not None)
         self.b_remove.setEnabled(not busy and n > 0)
+        self.b_base.setEnabled(not busy)
         self.rb_aligned.setEnabled(self.result is not None)
         self.colour_mode.setEnabled(self.quality is not None)
         self.drop_hint.setVisible(n == 0)
@@ -552,14 +555,7 @@ class MainWindow(QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        paths = []
-        for url in e.mimeData().urls():
-            p = url.toLocalFile()
-            if os.path.isdir(p):
-                paths += sorted(os.path.join(p, f) for f in os.listdir(p)
-                                if f.lower().endswith(".pcd"))
-            elif p.lower().endswith(".pcd"):
-                paths.append(p)
+        paths = find_pcd_files([url.toLocalFile() for url in e.mimeData().urls()])
         if paths:
             self.add_files(paths)
         else:
@@ -571,24 +567,74 @@ class MainWindow(QMainWindow):
         if paths:
             self.add_files(paths)
 
+    def _add_folder_dialog(self):
+        path = QFileDialog.getExistingDirectory(self, "Add every .pcd file in a folder")
+        if path:
+            paths = find_pcd_files([path])
+            if paths:
+                self.add_files(paths)
+            else:
+                self._set_status("No .pcd files found in that folder.")
+
+    def _base_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Existing merged cloud", "",
+                                              "PCD point cloud (*.pcd);;All files (*)")
+        if not path or self._busy():
+            return
+        if self.base_path and self.clouds:
+            del self.clouds[0]  # replace the previous base
+            del self._samples[0]
+        self.base_path = None
+        keep = [k for k, c in enumerate(self.clouds)
+                if os.path.abspath(c.path or "") != os.path.abspath(path)]
+        self.clouds = [self.clouds[k] for k in keep]
+        self._samples = [self._samples[k] for k in keep]
+        self._loading_base = True
+        self._run(_load_files, ([path],), self._loaded, "Loading merged cloud…")
+
     def add_files(self, paths):
-        known = {c.path for c in self.clouds}
-        paths = [p for p in paths if p not in known]
+        known = {os.path.abspath(c.path) for c in self.clouds if c.path}
+        paths = [p for p in paths if os.path.abspath(p) not in known]
+        skipped = []
+        if self.base_path:
+            skipped = already_merged(read_manifest(self.base_path), paths)
+            paths = [p for p in paths if p not in skipped]
+        if skipped:
+            self._set_status(f"Skipped {len(skipped)} file(s) already in the merged cloud.")
         if paths and not self._busy():
+            self._loading_base = False
             self._run(_load_files, (paths,), self._loaded, "Loading…")
 
     def _loaded(self, payload):
         loaded, errors = payload
-        self.clouds.extend(c for c, _ in loaded)
-        self._samples.extend(p for _, p in loaded)
+        if self._loading_base:
+            self._loading_base = False
+            if loaded:
+                base, sample = loaded[0]
+                self.base_path = base.path
+                self.clouds.insert(0, base)
+                self._samples.insert(0, sample)
+                done = set(already_merged(read_manifest(self.base_path),
+                                          [c.path for c in self.clouds[1:]]))
+                keep = [0] + [k for k in range(1, len(self.clouds))
+                              if self.clouds[k].path not in done]
+                self.clouds = [self.clouds[k] for k in keep]
+                self._samples = [self._samples[k] for k in keep]
+        else:
+            self.clouds.extend(c for c, _ in loaded)
+            self._samples.extend(p for _, p in loaded)
         self._rebuild_previews()
         self._invalidate()
         self._refresh_list()
         self._fit_view()
         if errors:
             QMessageBox.warning(self, "Some files could not be read", "\n".join(errors))
-        self._set_status(f"{len(self.clouds)} cloud(s) loaded. "
-                         + ("Press Align." if len(self.clouds) >= 2 else "Add at least one more."))
+        if self.base_path and len(self.clouds) < 2:
+            self._set_status("Merged cloud loaded. Now add the new scans to append to it.")
+        else:
+            self._set_status(f"{len(self.clouds)} cloud(s) loaded. "
+                             + ("Press Align." if len(self.clouds) >= 2
+                                else "Add at least one more."))
 
     def _rebuild_previews(self):
         if not self.clouds:
@@ -609,7 +655,9 @@ class MainWindow(QMainWindow):
             pm = QPixmap(14, 14)
             pm.fill(QColor(int(r * 255), int(g * 255), int(b * 255)))
             text = f"{c.name}  ({len(c):,} pts)"
-            if i == 0:
+            if i == 0 and self.base_path:
+                text += "  [existing merged cloud, stays fixed]"
+            elif i == 0:
                 text += "  [reference]"
             item = QListWidgetItem(QIcon(pm), text)
             item.setToolTip(f"{c.path}\nFields: {', '.join(c.field_names)}")
@@ -626,6 +674,8 @@ class MainWindow(QMainWindow):
         for r in rows:
             del self.clouds[r]
             del self._samples[r]
+        if 0 in rows:
+            self.base_path = None
         self._rebuild_previews()
         self._invalidate()
         self._refresh_list()
@@ -637,6 +687,7 @@ class MainWindow(QMainWindow):
         self.clouds.clear()
         self.previews.clear()
         self._samples.clear()
+        self.base_path = None
         self._invalidate()
         self._refresh_list()
         self._redraw()
@@ -656,7 +707,8 @@ class MainWindow(QMainWindow):
         if len(self.clouds) < 2:
             return
         seed = random.randrange(1 << 30) if new_seed else 0
-        settings = AlignSettings(voxel_size=self.voxel.value() or None, seed=seed)
+        settings = AlignSettings(voxel_size=self.voxel.value() or None, seed=seed,
+                                 anchor=self.base_path is not None)
         self._run(_align_clouds, (list(self.clouds), settings, list(self.previews)),
                   self._aligned, "Aligning…")
 
@@ -694,12 +746,28 @@ class MainWindow(QMainWindow):
     def _merge(self):
         if not self.result:
             return
+        include = [True] * len(self.clouds)
         if not self.result.ok:
-            ans = QMessageBox.question(
-                self, "PCD Merge",
-                "Some clouds could not be aligned and would be merged in their original "
-                "position. Merge anyway?")
-            if ans != QMessageBox.Yes:
+            bad = [c.name for c, ok in zip(self.clouds, self.result.connected) if not ok]
+            box = QMessageBox(self)
+            box.setWindowTitle("PCD Merge")
+            box.setIcon(QMessageBox.Question)
+            shown = ", ".join(bad[:8]) + (f" and {len(bad) - 8} more" if len(bad) > 8 else "")
+            box.setText(f"{len(bad)} cloud(s) could not be aligned: {shown}.")
+            box.setInformativeText("Leave them out of the merged cloud, or merge them in "
+                                   "their original position?")
+            b_skip = box.addButton("Leave them out", QMessageBox.AcceptRole)
+            b_all = box.addButton("Merge anyway", QMessageBox.DestructiveRole)
+            box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(b_skip)
+            box.exec()
+            if box.clickedButton() is b_skip:
+                include = list(self.result.connected)
+                if sum(include) < 2:
+                    QMessageBox.warning(self, "PCD Merge", "Fewer than two clouds aligned; "
+                                        "there is nothing to merge.")
+                    return
+            elif box.clickedButton() is not b_all:
                 return
         elif self.quality is not None and self.quality.grade == "Poor":
             ans = QMessageBox.question(
@@ -708,12 +776,15 @@ class MainWindow(QMainWindow):
                 "Merge anyway?")
             if ans != QMessageBox.Yes:
                 return
-        base = os.path.dirname(self.clouds[0].path or "")
         ext = getattr(self, "_save_ext", ".pcd")
+        if self.base_path:
+            ext = ".pcd"  # keep adding to the same file by default
+            suggested = self.base_path
+        else:
+            suggested = os.path.join(os.path.dirname(self.clouds[0].path or ""), "merged" + ext)
         filters = file_filter()
         chosen = next(f for f in filters.split(";;") if f.endswith(f"(*{ext})"))
-        path, selected = QFileDialog.getSaveFileName(self, "Save merged cloud",
-                                                     os.path.join(base, "merged" + ext),
+        path, selected = QFileDialog.getSaveFileName(self, "Save merged cloud", suggested,
                                                      filters, chosen)
         if not path:
             return
@@ -733,9 +804,9 @@ class MainWindow(QMainWindow):
                                     "writing uncompressed binary instead.")
                 compressed = False
         self._run(_merge_and_save,
-                  (list(self.clouds), list(self.result.transforms), path,
+                  (list(self.clouds), list(self.result.transforms), path, include,
                    self.cb_source.isChecked(), compressed, self.spacing.value() or None,
-                   self._cleanup_options()),
+                   self._cleanup_options(), self.base_path, self.result.voxel_size),
                   self._merged, "Merging…")
 
     def _cleanup_options(self) -> CleanupOptions:
@@ -745,13 +816,20 @@ class MainWindow(QMainWindow):
                               remove_moving=self.cb_moving.isChecked())
 
     def _merged(self, payload):
-        path, n, partial, notes = payload
+        path, n, partial, notes, include = payload
         msg = f"Saved {n:,} points to {path}"
+        left_out = len(include) - sum(include)
+        if left_out:
+            msg += f"\n\n{left_out} cloud(s) that could not be aligned were left out."
         if partial:
             msg += ("\n\nThese fields were missing from some files and were filled with 0: "
                     + ", ".join(partial))
         for note in notes:
             msg += "\n\n" + note[0].upper() + note[1:] + "."
+        if path.lower().endswith(".pcd"):
+            msg += ("\n\nThe list of scans in it is saved next to it as "
+                    f"{os.path.basename(path)}.json, so scans already in it are skipped if "
+                    "you add new scans to it later.")
         self._set_status(f"Saved {n:,} points to {os.path.basename(path)}.")
         QMessageBox.information(self, "PCD Merge", msg)
 
