@@ -296,3 +296,68 @@ def test_edit_mode_split_into_parts_and_save_one(window, qtbot, scans, tmp_path,
     view.colour_mode.setCurrentIndex(2)
     view.redraw()
     win.doc.dirty = False
+
+
+def test_walk_through_opens_reports_and_falls_back(window, qtbot, scans, tmp_path, monkeypatch):
+    from pcd_merge import flythrough
+    from pcd_merge.gui import main_window as mw
+
+    shown = []
+    monkeypatch.setattr(mw.QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
+    win = window()
+    win.load_paths([scans[0]])
+    win.walk_through()  # still loading: says so instead of doing nothing
+    assert shown and "still running" in shown[0]
+    _wait(qtbot, win)
+    win.walk_through()
+    _wait(qtbot, win)
+    assert win.view.walking
+    win.view.leave_walk()
+    assert not win.view.walking
+
+    # after a merge the scans are hidden and the merged cloud shown: walk through that
+    merged = str(tmp_path / "merged.pcd")
+    write_cloud(merged, read_cloud(scans[1]).data)
+    win.doc.project.record_export(merged, 10, visible=True)
+    win.doc.set_visible(0, False)
+    win.walk_through()
+    _wait(qtbot, win)
+    assert win.view.walking  # before, this did nothing at all
+    win.view.leave_walk()
+    win.doc.project.exports.clear()
+    win.doc.set_visible(0, True)
+
+    # if the walk-through cannot be built inside the window, it opens in its own
+    real = flythrough.FlyThroughWindow
+
+    def embedded_fails(scene, title="", parent=None, on_exit=None):
+        if on_exit is not None:
+            raise RuntimeError("no second OpenGL view here")
+        return real(scene, title)
+
+    monkeypatch.setattr(flythrough, "FlyThroughWindow", embedded_fails)
+    win.walk_through()
+    _wait(qtbot, win)
+    assert not win.view.walking and win.view._walk_window.isVisible()
+    assert "window of its own" in win.tasks.status.text()
+    win.view._walk_window.close()
+    win.doc.dirty = False
+
+
+def test_unexpected_errors_are_shown_and_logged(tmp_path, monkeypatch, qtbot):
+    import sys
+
+    from pcd_merge.gui import main_window as mw
+
+    monkeypatch.setenv("PCD_MERGE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # restored afterwards
+    boxes = []
+    monkeypatch.setattr(mw.QMessageBox, "exec", lambda self: boxes.append(self.text()))
+    mw.install_error_handler()
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        sys.excepthook(*sys.exc_info())
+    assert boxes and "ValueError: boom" in boxes[0]
+    log = (tmp_path / "cfg" / "error.log").read_text()
+    assert "ValueError: boom" in log and "Traceback" in log

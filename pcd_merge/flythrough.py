@@ -429,6 +429,7 @@ class FlyThroughWindow(QWidget):
     def __init__(self, scene: Scene, title: str = "Fly-through", parent=None, on_exit=None):
         super().__init__(parent, Qt.Widget if on_exit else Qt.Window)
         self.embedded = on_exit is not None
+        self.on_gl_failed = None  # embedded: called with the error if OpenGL fails
         if not self.embedded:
             self.setAttribute(Qt.WA_DeleteOnClose)
             self.setWindowTitle(title)
@@ -570,14 +571,22 @@ class FlyThroughWindow(QWidget):
         self.view.setFocus()
 
     def _check_error(self):
-        if self.view.error:
-            QMessageBox.critical(self, "Fly-through",
-                                 "The 3D view could not be drawn on this computer's graphics "
-                                 f"card.\n\n{self.view.error}")
-            if self.embedded:
-                self.view.on_escape()
-            else:
-                self.close()
+        if not self.view.error:
+            return
+        if self.embedded and self.on_gl_failed is not None:
+            # Inside the main window some drivers refuse a second OpenGL view;
+            # a window of its own (as before 0.9) may still work.
+            error = self.view.error
+            self.view.on_escape()
+            self.on_gl_failed(error)
+            return
+        QMessageBox.critical(self, "Fly-through",
+                             "The 3D view could not be drawn on this computer's graphics "
+                             f"card.\n\n{self.view.error}")
+        if self.embedded:
+            self.view.on_escape()
+        else:
+            self.close()
 
     def closeEvent(self, e):
         self.view.release_gl()

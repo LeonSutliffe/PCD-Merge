@@ -104,6 +104,9 @@ class MainWindow(QMainWindow):
         self.align_panel.status.connect(self.tasks.set_status)
         self.view.walk_requested.connect(self.walk_through)
         self.view.selection_changed.connect(self._update_buttons)
+        self.view.walk_fallback.connect(lambda err: self.tasks.set_status(
+            "The walk-through opened in a window of its own (it could not be drawn inside "
+            f"this one: {err})."))
 
         self.align_panel.load_settings()
         self._update_title()
@@ -399,28 +402,40 @@ class MainWindow(QMainWindow):
     def walk_through(self):
         doc = self.doc
         shown = [i for i, s in enumerate(doc.scans) if s.entry.visible]
-        if not shown or self.tasks.busy:
+        merged = [e["path"] for e in doc.project.exports
+                  if e.get("visible") and os.path.isfile(e["path"])]
+        if self.tasks.busy:
+            QMessageBox.information(self, "PCD Merge", "Something is still running (see the "
+                                    "bottom of the window). Try the walk-through when it "
+                                    "has finished, or press Cancel.")
+            return
+        if not shown and not merged:
+            QMessageBox.information(self, "PCD Merge", "Tick at least one scan or merged cloud "
+                                    "in the list on the left to walk through it.")
             return
         aligned = self.view.aligned_shown()
         tfs = doc.transforms()
-        self.with_clouds(lambda: self._walk_now(shown, aligned, tfs), shown)
+        self.with_clouds(lambda: self._walk_now(shown, aligned, tfs, merged), shown)
 
-    def _walk_now(self, shown, aligned, tfs):
+    def _walk_now(self, shown, aligned, tfs, merged=()):
         import numpy as np
 
         clouds = [self.doc.scans[i].cloud for i in shown]
         transforms = [tfs[i] if aligned else np.eye(4) for i in shown]
-        title = ("Walk through: " + ", ".join(c.name for c in clouds[:3])
-                 + (f" and {len(clouds) - 3} more" if len(clouds) > 3 else ""))
+        names = [c.name for c in clouds] + [os.path.basename(p) for p in merged]
+        title = ("Walk through: " + ", ".join(names[:3])
+                 + (f" and {len(names) - 3} more" if len(names) > 3 else ""))
         edits = self.doc.edit_snapshot()
         keys = [self.doc.scans[i].entry.key for i in shown]
-        self.tasks.run(walk_scene, (clouds, transforms, [tfs[i] for i in shown], edits, keys),
+        self.tasks.run(walk_scene, (clouds, transforms, [tfs[i] for i in shown], edits, keys,
+                                    list(merged)),
                        lambda scene: self._walk_ready(scene, title), "Preparing walk-through…")
 
     def _walk_ready(self, scene, title):
         self.view.show_walk(scene, title)
-        self.tasks.set_status("Walk-through: click into the view, then use W A S D and the "
-                              "mouse. Esc or Leave walk-through to go back.")
+        if self.view.walking:  # (otherwise it opened in its own window, which says so)
+            self.tasks.set_status("Walk-through: click into the view, then use W A S D and "
+                                  "the mouse. Esc or Leave walk-through to go back.")
 
     # ---------------------------------------------------------------- projects
 
@@ -581,8 +596,10 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
-def walk_scene(clouds, transforms, edit_transforms, edits, keys, *, progress):
-    """The walk-through's scene, without the points deleted in Edit mode."""
+def walk_scene(clouds, transforms, edit_transforms, edits, keys, merged=(), *, progress):
+    """The walk-through's scene, without the points deleted in Edit mode.
+    ``merged`` are merged clouds shown in the view (files, already in the
+    project frame), walked through with the scans."""
     if edits is not None:
         from ..edits import filter_clouds
 
@@ -591,6 +608,15 @@ def walk_scene(clouds, transforms, edit_transforms, edits, keys, *, progress):
         if edits.parts:  # only the visible parts
             vis = [p for p in edits.parts if p.visible]
             clouds = [_in_parts(c, t, vis) for c, t in zip(clouds, edit_transforms)]
+    clouds, transforms = list(clouds), list(transforms)
+    if merged:
+        from ..readers import read_cloud
+
+        for k, path in enumerate(merged):
+            msg = f"Loading {os.path.basename(path)}"
+            clouds.append(read_cloud(path, progress=lambda f, m=msg, k=k: progress(
+                m, 0.3 * (k + f) / len(merged))))
+            transforms.append(np.eye(4))
     return build_scene(clouds, transforms, progress=progress)
 
 
@@ -609,6 +635,45 @@ def _in_parts(cloud, t, parts):
 def _key(cloud) -> str:
     p = os.path.normcase(os.path.abspath(cloud.path))
     return f"{p}#{cloud.extra['scan_index']}" if cloud.extra.get("scans_in_file", 1) > 1 else p
+
+
+def install_error_handler() -> None:
+    """Show unexpected errors instead of failing silently (the Windows app has
+    no console), and keep them in error.log next to the settings."""
+    import time
+    import traceback
+
+    from ..project import config_dir
+
+    showing = []
+
+    def hook(kind, value, tb):
+        text = "".join(traceback.format_exception(kind, value, tb))
+        sys.__stderr__ and sys.__stderr__.write(text)
+        log = ""
+        try:
+            log = os.path.join(config_dir(), "error.log")
+            os.makedirs(os.path.dirname(log), exist_ok=True)
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} PCD Merge {__version__}\n")
+                f.write(text)
+        except OSError:
+            log = ""
+        if showing or QApplication.instance() is None:
+            return
+        showing.append(1)
+        try:
+            box = QMessageBox(QMessageBox.Critical, "PCD Merge",
+                              f"Something went wrong: {kind.__name__}: {value}")
+            box.setInformativeText("Please send the details below (or the file "
+                                   f"{log}) to get it fixed." if log else
+                                   "Please send the details below to get it fixed.")
+            box.setDetailedText(text)
+            box.exec()
+        finally:
+            showing.clear()
+
+    sys.excepthook = hook
 
 
 def fit_to_screen(win) -> None:
@@ -634,6 +699,7 @@ def run(argv=None) -> int:
 
     if before_main_window(app):
         return 0  # installing or updating; the new copy starts by itself
+    install_error_handler()
     win = MainWindow()
     fit_to_screen(win)
     win.show()
