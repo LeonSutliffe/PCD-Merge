@@ -112,7 +112,8 @@ def main(argv=None) -> int:
     def progress(msg, frac):
         print(f"[{frac:4.0%}] {msg}")
 
-    xyz = [c.xyz[c.finite_mask()] for c in clouds]
+    # bound methods: each cloud's coordinates are made only when needed
+    xyz = [c.finite_xyz for c in clouds]
     settings = AlignSettings(voxel_size=args.voxel, seed=args.seed, anchor=bool(base))
     result = align(xyz, settings, progress)
 
@@ -127,7 +128,7 @@ def main(argv=None) -> int:
 
     from .quality import assess
 
-    quality = assess(xyz, result.transforms, result.voxel_size)
+    quality = assess(result.fine or xyz, result.transforms, result.voxel_size)
     print()
     for line in quality.lines([c.name for c in clouds]):
         print(line)

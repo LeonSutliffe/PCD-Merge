@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import open3d as o3d
 
-from .registration import to_o3d
+from .registration import to_o3d, voxel_down
 
 reg = o3d.pipelines.registration
 
@@ -133,9 +133,19 @@ def grade_pair(overlap: float, rmse: float, voxel: float) -> str:
     return "Poor"
 
 
-def _surface(xyz: np.ndarray, t: np.ndarray, voxel: float) -> o3d.geometry.PointCloud:
-    """Aligned, downsampled copy with normals: the 'surface' others are measured to."""
-    pc = to_o3d(xyz).voxel_down_sample(voxel * 0.5)
+def _surface(xyz, t: np.ndarray, voxel: float) -> o3d.geometry.PointCloud:
+    """Aligned, downsampled copy with normals: the 'surface' others are measured to.
+
+    ``xyz`` may also be a function returning the coordinates, or the cloud
+    already downsampled at ``voxel * 0.5`` (``AlignResult.fine``), which
+    skips the pass over every full-resolution point.
+    """
+    if isinstance(xyz, o3d.geometry.PointCloud):
+        pc = o3d.geometry.PointCloud(xyz)
+    else:
+        if callable(xyz):  # see registration.align
+            xyz = xyz()
+        pc = voxel_down(xyz, voxel * 0.5)  # chunked: keeps the window responsive
     pc.transform(t)
     pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 1.5, max_nn=30))
     return pc

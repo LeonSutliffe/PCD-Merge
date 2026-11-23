@@ -56,15 +56,17 @@ def format_of(path: str) -> str:
     return ext
 
 
-def write_cloud(path: str, data: np.ndarray, compressed: bool = False) -> list[str]:
+def write_cloud(path: str, data: np.ndarray, compressed: bool = False,
+                progress=None) -> list[str]:
     """Write ``data`` (a structured array from ``merge_clouds``) to ``path``.
 
     ``compressed`` only affects PCD (binary_compressed). The file is written
-    to ``path + '.part'`` first and renamed when complete.
+    to ``path + '.part'`` first and renamed when complete. ``progress(fraction)``
+    is reported while writing PCD; other formats report only when done.
     """
     ext = format_of(path)
     if ext == ".pcd":
-        write_pcd(path, data, compressed=compressed)
+        write_pcd(path, data, compressed=compressed, progress=progress)
         return []
     tmp = path + ".part" + ext  # libraries pick the codec from the extension
     if os.path.exists(tmp):
@@ -77,6 +79,8 @@ def write_cloud(path: str, data: np.ndarray, compressed: bool = False) -> list[s
         else:
             notes = _write_e57(tmp, data)
         os.replace(tmp, path)
+        if progress:
+            progress(1.0)
     except BaseException:
         if os.path.exists(tmp):
             os.remove(tmp)

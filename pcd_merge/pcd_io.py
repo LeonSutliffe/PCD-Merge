@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import struct
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 
@@ -33,6 +34,14 @@ _TYPE_MAP = {
     ("U", 8): "u8",
 }
 _KIND_TO_PCD = {"f": "F", "i": "I", "u": "U"}
+
+
+# Optional progress callback: ``progress(fraction)`` with fraction in 0..1.
+FracFn = Callable[[float], None] | None
+
+# Files are read and written in pieces of this size so that progress can be
+# reported and no second full-size copy of the data is needed.
+_CHUNK_BYTES = 64 * 1024 * 1024
 
 
 class PCDError(ValueError):
@@ -67,7 +76,15 @@ class PointCloud:
     def xyz(self) -> np.ndarray:
         """Point coordinates as an (N, 3) float64 array."""
         d = self.data
-        return np.stack([d["x"], d["y"], d["z"]], axis=1).astype(np.float64)
+        out = np.empty((len(d), 3), dtype=np.float64)
+        out[:, 0], out[:, 1], out[:, 2] = d["x"], d["y"], d["z"]
+        return out
+
+    def finite_xyz(self) -> np.ndarray:
+        """Like ``xyz`` but without points that have NaN or infinite coordinates."""
+        xyz = self.xyz
+        ok = np.isfinite(xyz).all(axis=1)
+        return xyz if ok.all() else xyz[ok]
 
     def has_field(self, name: str) -> bool:
         return name in self.data.dtype.names
@@ -175,47 +192,80 @@ def _build_dtype(header: dict) -> tuple[np.dtype, list[tuple[str, str, int, int]
     return np.dtype(dtype_fields), specs
 
 
-def read_pcd(path: str) -> PointCloud:
-    """Read a PCD file, keeping every field."""
+def read_pcd(path: str, progress: FracFn = None) -> PointCloud:
+    """Read a PCD file, keeping every field.
+
+    ``progress`` is called with the fraction read so far (0..1).
+    """
+    report = progress or (lambda _f: None)
     with open(path, "rb") as f:
         header, offset = _parse_header(f)
-        body = f.read()
 
-    if "FIELDS" not in header:
-        raise PCDError(f"{path} does not look like a PCD file")
-    dtype, specs = _build_dtype(header)
-    for axis in ("x", "y", "z"):
-        if axis not in dtype.names:
-            raise PCDError(f"{os.path.basename(path)} has no '{axis}' field")
+        if "FIELDS" not in header:
+            raise PCDError(f"{path} does not look like a PCD file")
+        dtype, specs = _build_dtype(header)
+        for axis in ("x", "y", "z"):
+            if axis not in dtype.names:
+                raise PCDError(f"{os.path.basename(path)} has no '{axis}' field")
 
-    if "POINTS" in header:
-        npoints = int(header["POINTS"][0])
-    else:
-        npoints = int(header.get("WIDTH", ["0"])[0]) * int(header.get("HEIGHT", ["1"])[0])
-    mode = header["DATA"][0].lower()
+        if "POINTS" in header:
+            npoints = int(header["POINTS"][0])
+        else:
+            npoints = int(header.get("WIDTH", ["0"])[0]) * int(header.get("HEIGHT", ["1"])[0])
+        mode = header["DATA"][0].lower()
 
-    if mode == "ascii":
-        data = _read_ascii(body, dtype, specs, npoints)
-    elif mode == "binary":
-        need = dtype.itemsize * npoints
-        if len(body) < need:
-            raise PCDError(f"{os.path.basename(path)} is truncated")
-        data = np.frombuffer(body, dtype=dtype, count=npoints).copy()
-    elif mode == "binary_compressed":
-        data = _read_compressed(body, dtype, specs, npoints)
-    else:
-        raise PCDError(f"unsupported PCD DATA type '{mode}'")
+        if mode == "binary":
+            # Read straight into the final array, in chunks for progress.
+            data = np.empty(npoints, dtype=dtype)
+            buf = memoryview(data.view(np.uint8).reshape(-1))
+            need, pos = len(buf), 0
+            while pos < need:
+                got = f.readinto(buf[pos : pos + _CHUNK_BYTES])
+                if not got:
+                    raise PCDError(f"{os.path.basename(path)} is truncated")
+                pos += got
+                report(pos / need)
+        elif mode == "ascii":
+            data = _read_ascii(f.read(), dtype, specs, npoints, report)
+        elif mode == "binary_compressed":
+            data = _read_compressed(f.read(), dtype, specs, npoints)
+        else:
+            raise PCDError(f"unsupported PCD DATA type '{mode}'")
+    report(1.0)
 
     viewpoint = tuple(float(v) for v in header.get("VIEWPOINT", [0, 0, 0, 1, 0, 0, 0]))
     return PointCloud(data=data, path=path, viewpoint=viewpoint)
 
 
-def _read_ascii(body: bytes, dtype: np.dtype, specs, npoints: int) -> np.ndarray:
-    text = body.decode("ascii", errors="replace").split()
+def _parse_ascii_numbers(body: bytes, limit: int, report) -> np.ndarray:
+    """Parse whitespace-separated numbers in chunks (fast, low memory)."""
+    parts, total, start, n = [], 0, 0, len(body)
+    while start < n and total < limit:
+        end = min(n, start + _CHUNK_BYTES)
+        if end < n:  # cut at a line break so no number is split
+            nl = body.rfind(b"\n", start, end)
+            end = nl + 1 if nl > start else n
+        text = body[start:end].decode("ascii", errors="replace")
+        try:
+            vals = np.fromstring(text, dtype=np.float64, sep=" ")
+        except (ValueError, DeprecationWarning):  # odd tokens; fall back to split
+            vals = np.array(text.split(), dtype=np.float64)
+        parts.append(vals)
+        total += vals.size
+        start = end
+        report(min(1.0, start / n))
+    values = np.concatenate(parts) if parts else np.zeros(0)
+    return values[:limit]
+
+
+def _read_ascii(body: bytes, dtype: np.dtype, specs, npoints: int, report=None) -> np.ndarray:
     ncols = sum(s[2] for s in specs)
     if npoints == 0:
         return np.zeros(0, dtype=dtype)
-    values = np.array(text[: npoints * ncols], dtype=np.float64)
+    try:
+        values = _parse_ascii_numbers(body, npoints * ncols, report or (lambda _f: None))
+    except ValueError as e:
+        raise PCDError(f"ASCII PCD has a value that is not a number ({e})") from None
     if values.size < npoints * ncols:
         raise PCDError("ASCII PCD has fewer values than the header says")
     values = values.reshape(npoints, ncols)
@@ -262,11 +312,13 @@ def _read_compressed(body: bytes, dtype: np.dtype, specs, npoints: int) -> np.nd
 
 
 def write_pcd(path: str, cloud: PointCloud | np.ndarray, binary: bool = True,
-              compressed: bool = False) -> None:
+              compressed: bool = False, progress: FracFn = None) -> None:
     """Write a structured array (or PointCloud) as an unorganised PCD file.
 
     ``compressed=True`` writes binary_compressed (needs python-lzf).
+    ``progress`` is called with the fraction written so far (0..1).
     """
+    report = progress or (lambda _f: None)
     data = cloud.data if isinstance(cloud, PointCloud) else cloud
     names, sizes, types, counts = [], [], [], []
     for name in data.dtype.names:
@@ -299,7 +351,11 @@ def write_pcd(path: str, cloud: PointCloud | np.ndarray, binary: bool = True,
     with open(tmp, "wb") as f:
         f.write(header.encode("ascii"))
         if mode == "binary":
-            f.write(packed.tobytes())
+            # write in chunks from the array's own memory (no full copy)
+            raw = memoryview(packed.view(np.uint8).reshape(-1)) if n else memoryview(b"")
+            for pos in range(0, len(raw), _CHUNK_BYTES):
+                f.write(raw[pos : pos + _CHUNK_BYTES])
+                report(min(1.0, (pos + _CHUNK_BYTES) / len(raw)))
         elif mode == "binary_compressed":
             cols = b"".join(np.ascontiguousarray(packed[name]).tobytes() for name in names)
             comp = _lzf.compress(cols) if cols else b""
@@ -310,6 +366,7 @@ def write_pcd(path: str, cloud: PointCloud | np.ndarray, binary: bool = True,
         else:
             _write_ascii(f, packed, names)
     os.replace(tmp, path)
+    report(1.0)
 
 
 def _write_ascii(f, data: np.ndarray, names) -> None:

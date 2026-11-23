@@ -103,9 +103,9 @@ def save_merged(clouds, transforms, path: str, include=None, add_source: bool = 
     keep = [k for k, inc in enumerate(include) if inc]
     sel = [clouds[k] for k in keep]
     tfs = [transforms[k] for k in keep]
-    progress("Applying transforms to full-resolution clouds", 0.1)
-    merged, partial, stats = merge_clouds_with_stats(sel, tfs, add_source_field=add_source,
-                                                     cleanup=cleanup, progress=progress)
+    merged, partial, stats = merge_clouds_with_stats(
+        sel, tfs, add_source_field=add_source, cleanup=cleanup,
+        progress=lambda m, f: progress(m, 0.5 * f))
     numbered = add_source or "source" in merged.dtype.names
     ids = source_ids(sel)
     entries = []
@@ -126,12 +126,14 @@ def save_merged(clouds, transforms, path: str, include=None, add_source: bool = 
     if min_spacing:
         from .thinning import thin
 
-        progress(f"Thinning {len(merged):,} points to {min_spacing:g} spacing", 0.4)
+        progress(f"Thinning {len(merged):,} points to {min_spacing:g} spacing", 0.5)
         before = len(merged)
         merged = thin(merged, min_spacing)
         notes.append(f"thinned to a minimum spacing of {min_spacing:g}: kept {len(merged):,} "
                      f"of {before:,} points ({len(merged) / max(before, 1):.0%})")
-    progress(f"Writing {len(merged):,} points", 0.6)
-    notes += write_cloud(path, merged, compressed=compressed)
+    msg = f"Writing {len(merged):,} points to {os.path.basename(path)}"
+    progress(msg, 0.6)
+    notes += write_cloud(path, merged, compressed=compressed,
+                         progress=lambda f: progress(msg, 0.6 + 0.4 * f))
     write_manifest(path, entries, voxel_size)
     return len(merged), partial, notes, stats

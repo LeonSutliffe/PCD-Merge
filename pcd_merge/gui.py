@@ -9,7 +9,7 @@ import sys
 import traceback
 
 import numpy as np
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QElapsedTimer, QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -63,18 +63,36 @@ PALETTE = [
 # Background work
 
 
+class Cancelled(Exception):
+    """Raised inside a worker when the user presses Cancel."""
+
+
 class _Worker(QObject):
     progress = Signal(str, float)
     finished = Signal(object)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, fn, *args):
         super().__init__()
         self.fn, self.args = fn, args
+        self.cancel_requested = False
+        self._last = ("", -1.0)
+
+    def _progress(self, msg: str, frac: float):
+        # Called from the work itself; this is where a Cancel takes effect.
+        if self.cancel_requested:
+            raise Cancelled()
+        # Skip updates the bar would not show, so huge files don't flood the UI.
+        if msg != self._last[0] or frac - self._last[1] >= 0.005:
+            self._last = (msg, frac)
+            self.progress.emit(msg, frac)
 
     def run(self):
         try:
-            result = self.fn(*self.args, progress=self.progress.emit)
+            result = self.fn(*self.args, progress=self._progress)
+        except Cancelled:
+            self.cancelled.emit()
         except Exception as e:  # report every failure to the UI
             traceback.print_exc()
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -82,26 +100,63 @@ class _Worker(QObject):
             self.finished.emit(result)
 
 
+def _preview_sample(cloud: PointCloud, n: int = PREVIEW_POINTS) -> np.ndarray:
+    """A random subset of up to ``n`` finite points, in random order.
+
+    Taking the first k rows of it gives a random k-point preview, so the 3D
+    view never has to touch the full cloud again.
+    """
+    d = cloud.data
+    rng = np.random.default_rng(0)
+    if len(d) > n:
+        idx = np.unique(rng.integers(0, len(d), n))
+        d = d[idx]
+    xyz = np.empty((len(d), 3), dtype=np.float64)
+    xyz[:, 0], xyz[:, 1], xyz[:, 2] = d["x"], d["y"], d["z"]
+    xyz = xyz[np.isfinite(xyz).all(axis=1)]
+    return xyz[rng.permutation(len(xyz))]
+
+
 def _load_files(paths, progress):
     out, errors = [], []
-    for k, p in enumerate(paths):
-        progress(f"Loading {os.path.basename(p)}", k / max(1, len(paths)))
+    sizes = []
+    for p in paths:
         try:
-            out.append(read_pcd(p))
+            sizes.append(max(1, os.path.getsize(p)))
+        except OSError:
+            sizes.append(1)
+    total, done = float(sum(sizes)), 0.0
+    for p, size in zip(paths, sizes):
+        name = os.path.basename(p)
+        msg = f"Loading {name} ({size / 1e6:,.0f} MB)"
+        base = done / total
+        span = size / total
+        progress(msg, base)
+        try:
+            c = read_pcd(p, progress=lambda f, m=msg, b=base, s=span: progress(m, b + s * f * 0.95))
+            progress(f"Preparing preview of {name}", base + span * 0.95)
+            out.append((c, _preview_sample(c)))
+        except Cancelled:
+            raise
         except Exception as e:
-            errors.append(f"{os.path.basename(p)}: {e}")
+            errors.append(f"{name}: {e}")
+        done += size
     return out, errors
 
 
 def _align_clouds(clouds, settings, previews, progress):
-    xyz = [c.xyz[c.finite_mask()] for c in clouds]
+    # Bound methods: each full-size coordinate array is made only when needed,
+    # one at a time.
+    xyz = [c.finite_xyz for c in clouds]
 
     def align_progress(msg, frac):
         progress(msg, frac * 0.9)
 
     result = align(xyz, settings, align_progress)
     progress("Measuring alignment quality", 0.92)
-    quality = assess(xyz, result.transforms, result.voxel_size, preview_xyz=previews)
+    # Reuse the downsampled clouds from alignment instead of the full ones.
+    quality = assess(result.fine or xyz, result.transforms, result.voxel_size,
+                     preview_xyz=previews)
     return result, quality
 
 
@@ -121,13 +176,10 @@ def _legend_pixmap(width=160, height=12) -> QPixmap:
 
 def _merge_and_save(clouds, transforms, path, include, add_source, compressed, spacing,
                     cleanup, base_path, voxel_size, progress):
-    def clean_progress(msg, frac):
-        progress(msg, 0.15 + 0.25 * frac)
-
     n, partial, notes, stats = save_merged(
         clouds, transforms, path, include, add_source=add_source, compressed=compressed,
         base_path=base_path, voxel_size=voxel_size, min_spacing=spacing, cleanup=cleanup,
-        progress=clean_progress)
+        progress=progress)
     if stats is not None:
         notes = stats.lines([c.name for c, inc in zip(clouds, include) if inc]) + notes
     return path, n, partial, notes, include
@@ -145,7 +197,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.clouds: list[PointCloud] = []
-        self.previews: list[np.ndarray] = []  # subsampled xyz per cloud
+        self.previews: list[np.ndarray] = []  # subsampled xyz per cloud, as drawn
+        self._samples: list[np.ndarray] = []  # random preview sample per cloud
         self.result: AlignResult | None = None
         self.quality: QualityReport | None = None
         self._thread: QThread | None = None
@@ -300,12 +353,27 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.b_save_tf)
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 1000)
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("")
+        self.b_cancel = QPushButton("Cancel")
+        self.b_cancel.setToolTip("Stop the current step. Nothing already loaded is lost.")
+        self.b_cancel.clicked.connect(self._cancel)
+        self.b_cancel.setVisible(False)
+        prow = QHBoxLayout()
+        prow.addWidget(self.progress, 1)
+        prow.addWidget(self.b_cancel)
         self.status = QLabel("Ready.")
         self.status.setWordWrap(True)
-        lv.addWidget(self.progress)
+        lv.addLayout(prow)
         lv.addWidget(self.status)
+        # Ticks while work runs, so the elapsed time keeps moving even during
+        # a single long step.
+        self._clock = QElapsedTimer()
+        self._tick = QTimer(self)
+        self._tick.setInterval(500)
+        self._tick.timeout.connect(self._update_progress_text)
+        self._frac = 0.0
 
         # ---- right panel: 3D view
         right = QWidget()
@@ -409,7 +477,26 @@ class MainWindow(QMainWindow):
     def _set_status(self, msg: str, frac: float | None = None):
         self.status.setText(msg)
         if frac is not None:
-            self.progress.setValue(int(frac * 100))
+            self._frac = max(0.0, min(1.0, frac))
+            self.progress.setValue(int(self._frac * 1000))
+            self._update_progress_text()
+
+    def _update_progress_text(self):
+        if not self._busy():
+            self.progress.setFormat("")
+            return
+        secs = self._clock.elapsed() / 1000.0
+        text = f"{self._frac:.0%}   {_fmt_secs(secs)}"
+        # A remaining-time estimate is only shown once it can be meaningful.
+        if 0.1 <= self._frac < 1.0 and secs > 3:
+            text += f" (about {_fmt_secs(secs * (1 - self._frac) / self._frac)} left)"
+        self.progress.setFormat(text)
+
+    def _cancel(self):
+        if self._worker is not None:
+            self._worker.cancel_requested = True
+            self.b_cancel.setEnabled(False)
+            self.status.setText("Cancelling after the current step…")
 
     def _run(self, fn, args, on_done, label):
         if self._busy():
@@ -424,6 +511,11 @@ class MainWindow(QMainWindow):
         self._on_done = on_done
         self._worker.finished.connect(self._worker_done)
         self._worker.failed.connect(self._worker_failed)
+        self._worker.cancelled.connect(self._worker_cancelled)
+        self._clock.start()
+        self._tick.start()
+        self.b_cancel.setEnabled(True)
+        self.b_cancel.setVisible(True)
         self._set_status(label, 0.0)
         self._thread.start()
         self._update_buttons()
@@ -434,13 +526,22 @@ class MainWindow(QMainWindow):
     def _worker_failed(self, message):
         self._finish(None, message, failed=True)
 
-    def _finish(self, on_done, payload, failed=False):
+    def _worker_cancelled(self):
+        self._finish(None, None, cancelled=True)
+
+    def _finish(self, on_done, payload, failed=False, cancelled=False):
         self._thread.quit()
         self._thread.wait()
         self._thread = None
         self._worker = None
-        self.progress.setValue(100 if not failed else 0)
-        if failed:
+        self._tick.stop()
+        self.b_cancel.setVisible(False)
+        secs = self._clock.elapsed() / 1000.0
+        self.progress.setValue(0 if failed or cancelled else 1000)
+        self.progress.setFormat("" if failed or cancelled else f"Done in {_fmt_secs(secs)}")
+        if cancelled:
+            self._set_status("Cancelled.")
+        elif failed:
             self._set_status("Failed: " + payload)
             QMessageBox.critical(self, "PCD Merge", payload)
         else:
@@ -482,9 +583,12 @@ class MainWindow(QMainWindow):
             return
         if self.base_path and self.clouds:
             del self.clouds[0]  # replace the previous base
+            del self._samples[0]
         self.base_path = None
-        self.clouds = [c for c in self.clouds if os.path.abspath(c.path or "") !=
-                       os.path.abspath(path)]
+        keep = [k for k, c in enumerate(self.clouds)
+                if os.path.abspath(c.path or "") != os.path.abspath(path)]
+        self.clouds = [self.clouds[k] for k in keep]
+        self._samples = [self._samples[k] for k in keep]
         self._loading_base = True
         self._run(_load_files, ([path],), self._loaded, "Loading merged cloud…")
 
@@ -498,21 +602,27 @@ class MainWindow(QMainWindow):
         if skipped:
             self._set_status(f"Skipped {len(skipped)} file(s) already in the merged cloud.")
         if paths and not self._busy():
+            self._loading_base = False
             self._run(_load_files, (paths,), self._loaded, "Loading…")
 
     def _loaded(self, payload):
-        clouds, errors = payload
+        loaded, errors = payload
         if self._loading_base:
             self._loading_base = False
-            if clouds:
-                self.base_path = clouds[0].path
-                self.clouds.insert(0, clouds[0])
-                done = already_merged(read_manifest(self.base_path),
-                                      [c.path for c in self.clouds[1:]])
-                self.clouds = [self.clouds[0]] + [c for c in self.clouds[1:]
-                                                  if c.path not in done]
+            if loaded:
+                base, sample = loaded[0]
+                self.base_path = base.path
+                self.clouds.insert(0, base)
+                self._samples.insert(0, sample)
+                done = set(already_merged(read_manifest(self.base_path),
+                                          [c.path for c in self.clouds[1:]]))
+                keep = [0] + [k for k in range(1, len(self.clouds))
+                              if self.clouds[k].path not in done]
+                self.clouds = [self.clouds[k] for k in keep]
+                self._samples = [self._samples[k] for k in keep]
         else:
-            self.clouds.extend(clouds)
+            self.clouds.extend(c for c, _ in loaded)
+            self._samples.extend(p for _, p in loaded)
         self._rebuild_previews()
         self._invalidate()
         self._refresh_list()
@@ -529,14 +639,9 @@ class MainWindow(QMainWindow):
     def _rebuild_previews(self):
         if not self.clouds:
             return
+        # Samples are random and in random order, so a prefix is a random subset.
         per = PREVIEW_POINTS // len(self.clouds)
-        rng = np.random.default_rng(0)
-        out = []
-        for c in self.clouds:
-            xyz = c.xyz[c.finite_mask()]
-            if len(xyz) > per:
-                xyz = xyz[rng.choice(len(xyz), per, replace=False)]
-            out.append(xyz)
+        out = [s[:per] for s in self._samples]
         self.previews = out
         # Draw relative to the reference cloud so large (e.g. UTM) coordinates
         # don't lose precision in float32 OpenGL buffers.
@@ -568,6 +673,7 @@ class MainWindow(QMainWindow):
             return
         for r in rows:
             del self.clouds[r]
+            del self._samples[r]
         if 0 in rows:
             self.base_path = None
         self._rebuild_previews()
@@ -580,6 +686,7 @@ class MainWindow(QMainWindow):
             return
         self.clouds.clear()
         self.previews.clear()
+        self._samples.clear()
         self.base_path = None
         self._invalidate()
         self._refresh_list()
@@ -788,6 +895,11 @@ class MainWindow(QMainWindow):
 
         self.view.setCameraPosition(pos=Vector(*centre), distance=float(np.linalg.norm(hi - lo)) * 1.1,
                                     elevation=35, azimuth=-60)
+
+
+def _fmt_secs(secs: float) -> str:
+    secs = int(round(secs))
+    return f"{secs // 60}:{secs % 60:02d}" if secs >= 60 else f"{secs} s"
 
 
 def run(argv=None) -> int:
