@@ -377,28 +377,44 @@ def _batch_pairs(prepared: list[_Prepared], voxel: float, s: AlignSettings,
 
     # Second chance for scans still on their own: RANSAC sometimes misses a
     # real overlap (repetitive walls, little structure). Retry their most
-    # promising pairs with a wider search before giving up on them.
+    # promising pairs with coarser features (they describe larger
+    # neighbourhoods, which helped most in testing) and a wider search, then
+    # refine at the normal resolution.
     if comps.count() > 1:
-        retry = dataclasses.replace(s, ransac_attempts=s.ransac_attempts * 3)
-        main = max(range(n), key=lambda k: sum(comps.find(m) == comps.find(k) for m in range(n)))
-        if s.anchor:
-            main = 0
-        for k in range(n):
-            if comps.find(k) == comps.find(main):
-                continue
-            tries = sorted((p for p in pairs if k in (p.source, p.target)
-                            and comps.find(p.target if p.source == k else p.source)
-                            == comps.find(main)),
-                           key=lambda p: -p.fitness)[:3]
-            for old in tries:
-                progress(f"Retrying cloud {old.source + 1} with cloud {old.target + 1}",
-                         0.75)
-                p = register_pair(prepared[old.source], prepared[old.target], voxel, retry,
-                                  old.source, old.target)
-                pairs.append(p)
-                if p.trusted(s):
-                    comps.union(p.source, p.target)
-                    break
+        retry = dataclasses.replace(s, ransac_attempts=s.ransac_attempts * 2)
+        coarse_voxel = voxel * 1.5
+        coarse: dict[int, _Prepared] = {}
+
+        def coarse_of(k):
+            if k not in coarse:
+                coarse[k] = _prepare(np.asarray(prepared[k].fine.points), coarse_voxel)
+            return coarse[k]
+
+        def crosses(p):
+            a, b = comps.find(p.source), comps.find(p.target)
+            if s.anchor:  # only links to the merged cloud's group help
+                root = comps.find(0)
+                return (a == root) != (b == root)
+            return a != b
+
+        retried: set[tuple[int, int]] = set()
+        budget = 3 * (comps.count() - 1) + 3
+        while comps.count() > 1 and budget > 0:
+            cand = [p for p in pairs if crosses(p)
+                    and (min(p.source, p.target), max(p.source, p.target)) not in retried]
+            if not cand:
+                break
+            old = max(cand, key=lambda p: p.fitness)
+            a, b = old.source, old.target
+            retried.add((min(a, b), max(a, b)))
+            budget -= 1
+            progress(f"Retrying cloud {a + 1} with cloud {b + 1}", 0.75)
+            rough = register_pair(coarse_of(a), coarse_of(b), coarse_voxel, retry, a, b)
+            t = _refine(prepared[a], prepared[b], rough.transformation, voxel)
+            p = _pair_result(prepared[a], prepared[b], t, voxel, a, b)
+            pairs.append(p)
+            if p.trusted(s):
+                comps.union(a, b)
 
     # Loop closures from the rough poses.
     good = [p for p in pairs if p.trusted(s)]
