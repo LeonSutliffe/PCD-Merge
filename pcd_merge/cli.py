@@ -29,11 +29,17 @@ def _parse(argv):
     p.add_argument("--compressed", action="store_true", help="write binary_compressed PCD")
     p.add_argument("--force", action="store_true",
                    help="merge even if some clouds could not be aligned")
+    p.add_argument("--selftest", action="store_true",
+                   help="run a quick end-to-end check of this installation and exit")
     return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = _parse(sys.argv[1:] if argv is None else argv)
+    if args.selftest:
+        from .selftest import run as selftest
+
+        return selftest()
     if not args.files:
         from .gui import run
 

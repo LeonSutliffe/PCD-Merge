@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
 from .merge import merge_clouds
 from .pcd_io import PointCloud, read_pcd, write_pcd
 from .registration import AlignResult, AlignSettings, align
@@ -107,7 +108,7 @@ def _merge_and_save(clouds, transforms, path, add_source, compressed, progress):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PCD Merge")
+        self.setWindowTitle(f"PCD Merge {__version__}")
         self.resize(1300, 820)
         self.setAcceptDrops(True)
 
@@ -543,6 +544,10 @@ class MainWindow(QMainWindow):
 def run(argv=None) -> int:
     app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("PCD Merge")
+    from .startup import before_main_window
+
+    if before_main_window(app):
+        return 0  # installing or updating; the new copy starts by itself
     win = MainWindow()
     win.show()
     files = [a for a in (sys.argv[1:] if argv is None else argv[1:]) if a.lower().endswith(".pcd")]

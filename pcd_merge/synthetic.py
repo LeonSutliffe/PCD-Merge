@@ -1,4 +1,4 @@
-"""Synthetic LiDAR-like scans of a small outdoor scene, for tests and demos."""
+"""Synthetic LiDAR-like scans of a small outdoor scene, for tests, the self-test and demos."""
 
 from __future__ import annotations
 

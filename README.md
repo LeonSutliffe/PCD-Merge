@@ -32,7 +32,28 @@ alignment, and warns when a cloud overlaps the others by less than 30% or could
 not be matched at all. In that case press **Retry** (new random start) or try a
 larger voxel size.
 
-## Install
+## Install on Windows (no Python needed)
+
+1. Download the latest `PCD-Merge-…-windows-x64.zip` from
+   [Releases](https://github.com/LeonSutliffe/PCD-Merge/releases/latest).
+2. Unzip it anywhere and double-click **PCD Merge.exe** inside.
+3. The first time, it offers to install itself for your user account. Say yes:
+   it copies itself to `%LOCALAPPDATA%\PCD Merge`, puts a **PCD Merge**
+   shortcut on your Desktop and in the Start menu, and starts. You can delete
+   the unzipped folder afterwards.
+
+From then on, start it from the shortcut. Each start checks for a newer
+release; if there is one it asks, downloads it, swaps it in and starts the new
+version. "Skip this version" stops it asking about that release. Offline, it
+just starts.
+
+Windows may show a SmartScreen warning the first time because the program is
+not code-signed: choose *More info*, then *Run anyway*.
+
+To check an installation works: `"PCD Merge.exe" --selftest` (writes
+`%TEMP%\pcd-merge-selftest.log`).
+
+## Install from source
 
 Python 3.10 or newer.
 
@@ -87,6 +108,17 @@ Options: `--voxel 0.3`, `--seed 1` (repeatable runs), `--source-field` (adds a
   catch this.
 * Planned: a manual fallback where you pick a few matching points in two clouds
   to give the alignment a start.
+
+## Releasing a new version
+
+1. Bump `__version__` in `pcd_merge/__init__.py` (e.g. `0.2.0` → `0.3.0`).
+2. Merge to `main`. The *windows build* workflow builds and tests the bundled
+   program and publishes release `v0.3.0` with the zip.
+3. Installed copies offer the update the next time they start.
+
+Every PR also gets a test build of the zip under the workflow run's artifacts.
+To build locally on Windows: `pip install -e ".[build]"` then
+`pyinstaller packaging/pcd_merge.spec` (output in `dist\PCD Merge`).
 
 ## Development
 
