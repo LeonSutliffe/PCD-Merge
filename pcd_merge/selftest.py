@@ -1,0 +1,79 @@
+"""Quick end-to-end check that a build works: ``PCD Merge.exe --selftest``.
+
+Writes a log and exits 0 on success, 1 on failure. Used by CI on the bundled
+Windows program, and handy for checking an install by hand.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import time
+import traceback
+
+
+def run(log_path: str | None = None) -> int:
+    log_path = log_path or os.environ.get("PCD_MERGE_SELFTEST_LOG") or os.path.join(
+        tempfile.gettempdir(), "pcd-merge-selftest.log")
+    lines: list[str] = []
+
+    def log(msg: str) -> None:
+        lines.append(msg)
+        if sys.stdout is not None:
+            print(msg, flush=True)
+
+    ok = False
+    t0 = time.time()
+    try:
+        import numpy as np
+
+        from . import __version__
+        from .merge import merge_clouds
+        from .pcd_io import read_pcd, write_pcd
+        from .registration import AlignSettings, align
+        from .synthetic import make_scan, make_scene, make_transform, transform_error
+
+        log(f"PCD Merge {__version__} self-test, Python {sys.version.split()[0]}")
+        poses = [make_transform(0.3, 0.02, (-5, 0, 1.5)), make_transform(2.0, 0.03, (4, 3, 1.6))]
+        scene = make_scene(seed=0, density=100)
+        tmp = tempfile.mkdtemp(prefix="pcd-merge-selftest-")
+        paths = []
+        for i, p in enumerate(poses):
+            path = os.path.join(tmp, f"scan{i}.pcd")
+            write_pcd(path, make_scan(scene, p[:2, 3], 18, p, seed=i), compressed=(i == 1))
+            paths.append(path)
+        clouds = [read_pcd(p) for p in paths]
+        log(f"read/write ok: {[len(c) for c in clouds]} points")
+
+        r = align([c.xyz for c in clouds], AlignSettings(seed=1))
+        rot, trans = transform_error(r.transforms[1], np.linalg.inv(poses[0]) @ poses[1])
+        log(f"alignment error: {rot:.4f} deg, {trans:.4f} m")
+        if rot > 0.5 or trans > 0.05:
+            raise RuntimeError("alignment is wrong")
+
+        merged, _ = merge_clouds(clouds, r.transforms)
+        out = os.path.join(tmp, "merged.pcd")
+        write_pcd(out, merged)
+        assert len(read_pcd(out)) == sum(len(c) for c in clouds)
+        log(f"merge ok: {len(merged)} points")
+
+        from PySide6.QtWidgets import QApplication
+
+        from .gui import HAVE_GL, MainWindow
+
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        w = MainWindow()
+        w.close()
+        del app
+        log(f"GUI ok (3D preview available: {HAVE_GL})")
+        ok = True
+    except Exception:
+        log("FAILED\n" + traceback.format_exc())
+    log(f"{'PASSED' if ok else 'FAILED'} in {time.time() - t0:.1f}s")
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+    return 0 if ok else 1

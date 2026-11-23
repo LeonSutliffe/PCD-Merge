@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcd-merge"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Drag in LiDAR point clouds (PCD), align them automatically and merge them into one cloud."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,12 +21,16 @@ dependencies = [
 # pure-Python decoder is used for reading.
 fast = ["python-lzf>=0.2.4"]
 test = ["pytest>=7", "python-lzf>=0.2.4"]
+build = ["pyinstaller>=6", "python-lzf>=0.2.4"]
 
 [project.scripts]
 pcd-merge = "pcd_merge.cli:main"
 
 [tool.setuptools]
 packages = ["pcd_merge"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pcd_merge.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -6,7 +6,7 @@ from pcd_merge.merge import merge_clouds, transform_cloud
 from pcd_merge.pcd_io import PointCloud, read_pcd, write_pcd
 from pcd_merge.registration import AlignSettings, align
 
-from .synthetic import make_scan, make_scene, make_transform, transform_error
+from pcd_merge.synthetic import make_scan, make_scene, make_transform, transform_error
 
 POSES = [
     make_transform(0.3, 0.02, (-5, 0, 1.5)),

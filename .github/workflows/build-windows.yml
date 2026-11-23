@@ -1,0 +1,78 @@
+name: windows build
+
+# Builds the bundled Windows program and tests it on every push and PR.
+# On main, when pcd_merge/__init__.py has a version with no release yet,
+# a GitHub release v<version> is published with the zip. Installed copies
+# find it the next time they start.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pyinstaller python-lzf
+
+      - name: Version
+        id: version
+        shell: bash
+        run: echo "version=$(python -c 'import pcd_merge; print(pcd_merge.__version__)')" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: pyinstaller --noconfirm packaging/pcd_merge.spec
+
+      - name: Self-test the built program
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:TEMP "pcd-merge-selftest.log"
+          $p = Start-Process -FilePath "dist\PCD Merge\PCD Merge.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content $log
+          if ($p.ExitCode -ne 0) { throw "self-test failed with exit code $($p.ExitCode)" }
+
+      - name: Test update swap and shortcuts
+        run: python packaging/ci_windows_check.py "dist/PCD Merge"
+
+      - name: Zip
+        id: zip
+        shell: bash
+        run: |
+          name="PCD-Merge-${{ steps.version.outputs.version }}-windows-x64.zip"
+          cd dist && 7z a -tzip -mx=7 "../$name" "PCD Merge" > /dev/null && cd ..
+          ls -la "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.name }}
+          path: ${{ steps.zip.outputs.name }}
+          retention-days: 14
+
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag already exists; bump the version in pcd_merge/__init__.py to publish a new one."
+            exit 0
+          fi
+          gh release create "$tag" "${{ steps.zip.outputs.name }}" \
+            --title "PCD Merge ${{ steps.version.outputs.version }}" \
+            --target "${{ github.sha }}" --generate-notes
