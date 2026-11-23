@@ -85,16 +85,17 @@ def already_merged(manifest: list[dict], paths: list[str]) -> list[str]:
 def save_merged(clouds, transforms, path: str, include=None, add_source: bool = False,
                 compressed: bool = False, base_path: str | None = None,
                 voxel_size: float | None = None, min_spacing: float | None = None,
-                progress=None):
+                cleanup=None, progress=None):
     """Merge the included clouds, write the cloud (format from the extension)
     and its manifest.
 
     ``base_path`` is set when cloud 0 is an existing merged cloud being added
     to: its manifest (if any) is carried over and the new scans are appended.
-    Returns ``(number of points, partially-present fields, notes)``.
+    ``cleanup`` is an optional :class:`~pcd_merge.cleanup.CleanupOptions`.
+    Returns ``(number of points, partially-present fields, notes, cleanup stats)``.
     """
     from .exporters import write_cloud
-    from .merge import merge_clouds, source_ids
+    from .merge import merge_clouds_with_stats, source_ids
 
     progress = progress or (lambda _m, _f: None)
 
@@ -103,7 +104,8 @@ def save_merged(clouds, transforms, path: str, include=None, add_source: bool = 
     sel = [clouds[k] for k in keep]
     tfs = [transforms[k] for k in keep]
     progress("Applying transforms to full-resolution clouds", 0.1)
-    merged, partial = merge_clouds(sel, tfs, add_source_field=add_source)
+    merged, partial, stats = merge_clouds_with_stats(sel, tfs, add_source_field=add_source,
+                                                     cleanup=cleanup, progress=progress)
     numbered = add_source or "source" in merged.dtype.names
     ids = source_ids(sel)
     entries = []
@@ -132,4 +134,4 @@ def save_merged(clouds, transforms, path: str, include=None, add_source: bool = 
     progress(f"Writing {len(merged):,} points", 0.6)
     notes += write_cloud(path, merged, compressed=compressed)
     write_manifest(path, entries, voxel_size)
-    return len(merged), partial, notes
+    return len(merged), partial, notes, stats

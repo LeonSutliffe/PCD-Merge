@@ -90,10 +90,11 @@ pcd-merge            # or: python -m pcd_merge
 1. Drag `.pcd` files, or a whole folder (subfolders included), onto the window.
    *Original positions* shows the scans as they are in the files.
 2. Press **Align**. The view switches to *Aligned*, each cloud in its own colour.
-3. Check the result. Untick a file in the list to hide it.
+3. Check the result. Untick a file in the list to hide it. The quality report
+   (see below) grades the alignment Good, Fair or Poor.
 4. **Accept and merge...** writes the merged file, or **Retry** to try again.
    Pick the format in the save dialog (see *Output formats* below).
-   **Save transforms...** writes the 4x4 matrices as JSON.
+   **Save transforms...** writes the 4x4 matrices and the quality report as JSON.
 
 If some clouds could not be aligned, merging asks whether to leave them out or
 merge them in their original position.
@@ -132,6 +133,55 @@ Voxel size is *Automatic* by default (about 40,000 points per thinned cloud).
 Set it by hand, in the scans' units, if alignment fails: larger is more robust
 and faster, smaller is more precise. It never affects which points are merged.
 
+### Alignment quality report
+
+After aligning, the app measures how well the clouds agree, using the final
+transforms (what will actually be merged):
+
+* **Per pair:** overlap (share of points with a match in the other cloud) and
+  the RMSE, median and 90th percentile of the distance between them.
+* **Grade:** *Good* when the RMSE is within 0.15 x the voxel size and at least
+  30% overlaps; *Fair* up to 0.3 x voxel and 15% overlap; otherwise *Poor*.
+  The overall grade is the worst overlapping pair. Merging a *Poor* result asks
+  for confirmation first.
+* **Heatmap:** set *Colour* to *Alignment error* to colour every point by its
+  distance to the other clouds. Blue fits, red is off by the value on the scale
+  or more, grey was seen by only one scan (not an error). The app switches to
+  the heatmap by itself when the grade is not *Good*.
+
+Distances are point-to-plane (to the other cloud's local surface, not its
+nearest point), so two scans of the same wall read close to the sensor noise
+even though their points never coincide. Points further away than 1.5 x the
+voxel size count as not overlapping, so a badly wrong alignment shows up as low
+overlap rather than high RMSE.
+
+![Heatmap of a deliberately misaligned pair: walls and poles turn red](docs/quality-heatmap.png)
+
+### Clean-up while merging (optional)
+
+By default every original point goes into the merged file. Three optional
+steps, under *Clean-up while merging*, can tidy it up. They only ever **remove**
+points: nothing is resampled, averaged or moved, so the points that remain keep
+their exact coordinates and every field. The finished dialog says how many
+points each step removed from each file.
+
+* **Remove duplicate points where scans overlap.** Where two scans cover the
+  same spot you otherwise get two interleaved copies of every surface. Space is
+  split into small cubes (*cell*, automatic = a few times the point spacing); in
+  each cube that several scans reach, only the points of the scan that measured
+  it most densely are kept. That is usually the closest and most accurate scan,
+  so its full detail is kept. Areas only one scan saw are never touched.
+* **Remove isolated noise points.** Statistical outlier removal on each scan:
+  points far from all their neighbours (dust, rain, stray returns) are dropped.
+  Set conservatively, so real surfaces stay.
+* **Remove moving objects (people, cars) seen in only one scan.** A point from
+  one scan is dropped when another scan looked straight *through* that spot and
+  hit something further away, and has no point of its own there. Things that
+  were merely hidden from the other scan are kept. This needs each scan in its
+  scanner's own frame (normal for raw scans; the PCD `VIEWPOINT` is used as the
+  scanner position). A cloud that does not look like a single-position scan is
+  not used as evidence, and the report says so.
+
 ### Command line
 
 ```bash
@@ -151,14 +201,16 @@ Options: `--voxel 0.3`, `--min-spacing 0.02` (thin the output), `--seed 1`
 (repeatable runs), `--source-field` (adds a `source` field telling which file
 each point came from), `--compressed` (PCD only), `--skip-unaligned` (leave out
 clouds that could not be aligned) and `--force` (merge them anyway, in their
-original position).
+original position). Clean-up: `--dedup` (or `--dedup 0.1` to set the cell
+size), `--denoise`, `--remove-moving`. The quality report is printed after
+alignment.
 
 ## Limits and next steps
 
 * Needs real overlap between scans; below roughly 30% alignment gets unreliable.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
-  can align to the wrong spot. The overlap numbers and the preview are there to
-  catch this.
+  can align to the wrong spot. The quality report and the error heatmap are there
+  to catch this.
 * Planned: a manual fallback where you pick a few matching points in two clouds
   to give the alignment a start.
 
