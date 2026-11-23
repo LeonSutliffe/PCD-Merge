@@ -228,9 +228,13 @@ def moving_mask(parts_xyz: list[np.ndarray], origins: list[np.ndarray],
 # Overlap de-duplication
 
 
-def dedup_mask(parts_xyz: list[np.ndarray], cell: float) -> list[np.ndarray]:
+def dedup_mask(parts_xyz: list[np.ndarray], cell: float,
+               weights: list[float] | None = None) -> list[np.ndarray]:
     """For each cloud, True for points to keep: in cells reached by several
-    clouds, keep only the cloud with the most points in that cell."""
+    clouds, keep only the cloud with the most points in that cell.
+
+    ``weights`` multiplies each cloud's counts; the preview uses it to stand
+    in for the full clouds when it works on random subsets of different sizes."""
     sizes = [len(x) for x in parts_xyz]
     if len(parts_xyz) < 2 or sum(sizes) == 0:
         return [np.ones(s, dtype=bool) for s in sizes]
@@ -249,6 +253,8 @@ def dedup_mask(parts_xyz: list[np.ndarray], cell: float) -> list[np.ndarray]:
     pair = voxel * n_src + src
     upair, inv, counts = np.unique(pair, return_inverse=True, return_counts=True)
     pv, ps = upair // n_src, upair % n_src
+    if weights is not None:
+        counts = counts * np.asarray(weights, dtype=np.float64)[ps]
     # Sort by voxel, then count descending, then source ascending -> first per voxel wins.
     order = np.lexsort((ps, -counts, pv))
     first = np.ones(len(order), dtype=bool)
@@ -271,48 +277,73 @@ def auto_dedup_cell(parts_xyz: list[np.ndarray]) -> float:
     return max(4.0 * s, 1e-6) if s > 0 else 0.05
 
 
-def clean(parts: list[np.ndarray], origins: list[np.ndarray], opts: CleanupOptions,
-          progress=None) -> tuple[list[np.ndarray], CleanupStats]:
-    """Apply the chosen steps to already-transformed clouds (structured arrays
-    in the common frame). ``origins`` are the sensor positions in that frame.
+def clean_masks(xyz: list[np.ndarray], origins: list[np.ndarray], opts: CleanupOptions,
+                progress=None, weights: list[float] | None = None,
+                ) -> tuple[list[np.ndarray], CleanupStats]:
+    """Which points the chosen steps would remove, without removing them.
+
+    ``xyz`` are the clouds' coordinates in the common frame and ``origins``
+    the scanner positions in that frame. Returns, per cloud, True for points
+    that are kept, plus the counts. ``weights`` is passed to :func:`dedup_mask`.
     """
     stats = CleanupStats()
-    several = len(parts) > 1
+    n = len(xyz)
+    several = n > 1
     steps = [s for s, on in (("noise", opts.denoise), ("moving", opts.remove_moving and several),
                              ("dedup", opts.dedup and several)) if on]
 
     def report(msg, frac, step):
         if progress:
             progress(msg, (steps.index(step) + frac) / len(steps))
-    n = len(parts)
-    xyz = [_xyz(p) for p in parts]
+
+    keep = [np.ones(len(x), dtype=bool) for x in xyz]
+    # Indices (into the original arrays) of the points still in play.
+    alive = [np.arange(len(x)) for x in xyz]
+
+    def drop(masks):
+        removed = []
+        for i, m in enumerate(masks):
+            gone = alive[i][~m]
+            keep[i][gone] = False
+            alive[i] = alive[i][m]
+            removed.append(len(gone))
+        return removed
+
+    def cur():
+        return [x[a] for x, a in zip(xyz, alive)]
 
     if opts.denoise:
-        stats.noise = []
-        for i in range(n):
+        masks = []
+        for i, x in enumerate(cur()):
             report(f"Removing noise ({i + 1}/{n})", i / n, "noise")
-            k = noise_mask(xyz[i], opts.denoise_neighbors, opts.denoise_std_ratio)
-            stats.noise.append(int((~k).sum()))
-            parts[i], xyz[i] = parts[i][k], xyz[i][k]
+            masks.append(noise_mask(x, opts.denoise_neighbors, opts.denoise_std_ratio))
+        stats.noise = drop(masks)
 
-    if opts.remove_moving and n > 1:
+    if opts.remove_moving and several:
+        pts = cur()
         margin = opts.moving_margin
         if margin is None:
-            s = max((point_spacing(x) for x in xyz if len(x) > 1), default=0.0)
+            s = max((point_spacing(x) for x in pts if len(x) > 1), default=0.0)
             margin = max(5.0 * s, 0.1) if s > 0 else 0.3
-        keeps = moving_mask(xyz, [np.asarray(o, float) for o in origins], margin,
+        masks = moving_mask(pts, [np.asarray(o, float) for o in origins], margin,
                             lambda f: report("Removing moving objects", f, "moving"),
                             skipped=stats.no_sensor_position)
-        stats.moving = [int((~k).sum()) for k in keeps]
-        parts = [p[k] for p, k in zip(parts, keeps)]
-        xyz = [x[k] for x, k in zip(xyz, keeps)]
+        stats.moving = drop(masks)
 
-    if opts.dedup and n > 1:
+    if opts.dedup and several:
         report("Removing duplicate points in overlaps", 0.0, "dedup")
-        cell = opts.dedup_cell or auto_dedup_cell(xyz)
+        pts = cur()
+        cell = opts.dedup_cell or auto_dedup_cell(pts)
         stats.dedup_cell = cell
-        keeps = dedup_mask(xyz, cell)
-        stats.duplicate = [int((~k).sum()) for k in keeps]
-        parts = [p[k] for p, k in zip(parts, keeps)]
+        stats.duplicate = drop(dedup_mask(pts, cell, weights))
 
-    return parts, stats
+    return keep, stats
+
+
+def clean(parts: list[np.ndarray], origins: list[np.ndarray], opts: CleanupOptions,
+          progress=None) -> tuple[list[np.ndarray], CleanupStats]:
+    """Apply the chosen steps to already-transformed clouds (structured arrays
+    in the common frame). ``origins`` are the sensor positions in that frame.
+    """
+    keep, stats = clean_masks([_xyz(p) for p in parts], origins, opts, progress)
+    return [p[k] for p, k in zip(parts, keep)], stats

@@ -37,8 +37,9 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__, retry
-from .cleanup import CleanupOptions
+from .cleanup import CleanupOptions, clean_masks
 from .exporters import FORMATS, file_filter
+from .merge import sensor_origin
 from .files import already_merged, find_pcd_files, read_manifest, save_merged
 from .pcd_io import PointCloud, read_pcd
 from .quality import (NO_OVERLAP, QualityReport, assess, colour_stops, error_colours,
@@ -52,7 +53,8 @@ try:
 except Exception:  # pragma: no cover - depends on the machine's OpenGL
     HAVE_GL = False
 
-PREVIEW_POINTS = 400_000  # total points drawn in the 3D view
+PREVIEW_POINTS = 400_000
+REMOVED_COLOUR = (1.0, 1.0, 1.0, 1.0)  # points the clean-up would remove (white: unlike any cloud colour)  # total points drawn in the 3D view
 PALETTE = [
     (0.95, 0.35, 0.25), (0.25, 0.65, 0.95), (0.35, 0.85, 0.35), (0.95, 0.80, 0.20),
     (0.75, 0.40, 0.90), (0.20, 0.85, 0.80), (0.95, 0.55, 0.75), (0.65, 0.65, 0.65),
@@ -191,6 +193,43 @@ def _merge_and_save(clouds, transforms, path, include, add_source, compressed, s
     if stats is not None:
         notes = stats.lines([c.name for c, inc in zip(clouds, include) if inc]) + notes
     return path, n, partial, notes, include
+
+
+def _cleanup_preview(clouds, transforms, previews, opts):
+    """Run the chosen clean-up on the preview points (a random subset of each
+    cloud, already in memory), so ticking an option updates the view quickly.
+
+    Returns per cloud a mask of the preview points that would be kept, and the
+    counts. Counts are scaled up to an estimate for the full clouds."""
+    xyz, origins, weights = [], [], []
+    for c, t, p in zip(clouds, transforms, previews):
+        t = np.asarray(t, dtype=np.float64)
+        xyz.append(p @ t[:3, :3].T + t[:3, 3])
+        origins.append(sensor_origin(c, t))
+        weights.append(len(c) / max(len(p), 1))
+    keep, stats = clean_masks(xyz, origins, opts, weights=weights)
+    removed = [int(round((~k).sum() * w)) for k, w in zip(keep, weights)]
+    return keep, stats, removed
+
+
+class _PreviewWorker(QObject):
+    """Runs one clean-up preview on its own thread; no progress, no cancel."""
+
+    finished = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(self, gen, *args):
+        super().__init__()
+        self.gen, self.args = gen, args
+
+    def run(self):
+        try:
+            result = _cleanup_preview(*self.args)
+        except Exception as e:
+            traceback.print_exc()
+            self.failed.emit(self.gen, f"{type(e).__name__}: {e}")
+        else:
+            self.finished.emit(self.gen, result)
 
 
 # --------------------------------------------------------------------------
@@ -340,7 +379,36 @@ class MainWindow(QMainWindow):
             "and saw something further away. Objects hidden from the other scan are kept. "
             "Works on scans saved in their scanner's own frame (raw scans).")
         cl.addWidget(self.cb_moving)
+        prow = QHBoxLayout()
+        prow.addWidget(QLabel("In the preview, points to remove:"))
+        self.removed_mode = QComboBox()
+        self.removed_mode.addItems(["Highlight in white", "Hide"])
+        self.removed_mode.setToolTip(
+            "How the aligned preview shows the points the ticked clean-up would remove. "
+            "The preview uses a sample of each cloud, so it is a close guide; the merge "
+            "itself works on every point.")
+        prow.addWidget(self.removed_mode)
+        prow.addStretch(1)
+        cl.addLayout(prow)
+        self.cleanup_info = QLabel("")
+        self.cleanup_info.setWordWrap(True)
+        self.cleanup_info.setStyleSheet("color: #888;")
+        cl.addWidget(self.cleanup_info)
         lv.addWidget(box)
+
+        # Clean-up preview: recomputed shortly after any option changes.
+        self._cleanup_keep = None  # per-cloud mask of preview points kept
+        self._cleanup_gen = 0
+        self._cleanup_thread = None
+        self._cleanup_pending = False
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.setSingleShot(True)
+        self._cleanup_timer.setInterval(250)
+        self._cleanup_timer.timeout.connect(self._start_cleanup_preview)
+        for cb in (self.cb_dedup, self.cb_denoise, self.cb_moving):
+            cb.toggled.connect(self._cleanup_changed)
+        self.dedup_cell.valueChanged.connect(self._cleanup_changed)
+        self.removed_mode.currentIndexChanged.connect(self._redraw)
 
         self.cb_source = QCheckBox("Add a 'source' field (which file each point came from)")
         self.cb_compress = QCheckBox("Compress PCD output (binary_compressed)")
@@ -707,6 +775,7 @@ class MainWindow(QMainWindow):
 
     def _invalidate(self):
         self.result = None
+        self._cleanup_changed()
         self.quality = None
         self._reset_retries()
         self.report.clear()
@@ -801,6 +870,7 @@ class MainWindow(QMainWindow):
         if grade != "Good":
             self.colour_mode.setCurrentIndex(1)  # show where the clouds disagree
         self._update_buttons()
+        self._cleanup_changed()
         self._redraw()
         if warns or grade != "Good":
             self._set_status(f"Aligned, quality {grade}. Check the error heatmap before merging.")
@@ -919,6 +989,89 @@ class MainWindow(QMainWindow):
             json.dump(data, f, indent=2)
         self._set_status(f"Transforms saved to {os.path.basename(path)}.")
 
+    def closeEvent(self, e):
+        if self._cleanup_thread is not None:  # let a running preview finish first
+            self._cleanup_thread.quit()
+            self._cleanup_thread.wait()
+        super().closeEvent(e)
+
+    # ---------------------------------------------------------------- clean-up preview
+
+    def _cleanup_changed(self, *_):
+        """Options, clouds or alignment changed: drop the old preview and
+        schedule a new one (debounced, so dragging the cell size stays smooth)."""
+        self._cleanup_gen += 1
+        had = self._cleanup_keep is not None
+        self._cleanup_keep = None
+        opts = self._cleanup_options()
+        if not opts.any:
+            self.cleanup_info.setText("")
+        elif self.result is None:
+            self.cleanup_info.setText("Align first to see the effect in the preview.")
+        else:
+            self.cleanup_info.setText("Updating preview…")
+            self._cleanup_timer.start()
+        if had:
+            self._redraw()
+
+    def _start_cleanup_preview(self):
+        if self._cleanup_thread is not None:
+            self._cleanup_pending = True  # run again when the current one ends
+            return
+        opts = self._cleanup_options()
+        if not opts.any or self.result is None or len(self.previews) != len(self.clouds):
+            return
+        self._cleanup_pending = False
+        thread = QThread()
+        worker = _PreviewWorker(self._cleanup_gen, list(self.clouds),
+                                list(self.result.transforms), list(self.previews), opts)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._cleanup_done)
+        worker.failed.connect(self._cleanup_failed)
+        self._cleanup_thread, self._cleanup_worker = thread, worker
+        thread.start()
+
+    def _cleanup_thread_ended(self):
+        self._cleanup_thread.quit()
+        self._cleanup_thread.wait()
+        self._cleanup_thread = self._cleanup_worker = None
+        if self._cleanup_pending:
+            self._start_cleanup_preview()
+
+    def _cleanup_done(self, gen, payload):
+        self._cleanup_thread_ended()
+        if gen != self._cleanup_gen:
+            return  # options changed meanwhile; a newer preview is on its way
+        keep, stats, removed = payload
+        self._cleanup_keep = keep
+        total = sum(len(c) for c in self.clouds)
+        lines = []
+        if sum(removed):
+            parts = [(label, sum(c * w for c, w in zip(counts, self._weights())))
+                     for label, counts in (("noise", stats.noise),
+                                           ("moving objects", stats.moving),
+                                           ("duplicates", stats.duplicate)) if counts]
+            detail = ", ".join(f"{label} {int(n):,}" for label, n in parts)
+            lines.append(f"Preview: about {sum(removed):,} of {total:,} points "
+                         f"({sum(removed) / max(total, 1):.0%}) would be removed ({detail}).")
+        else:
+            lines.append("Preview: no points would be removed.")
+        if stats.no_sensor_position:
+            lines.append("Moving objects: no scanner position for "
+                         + ", ".join(self.clouds[i].name for i in stats.no_sensor_position)
+                         + ", so it is not used as evidence.")
+        self.cleanup_info.setText("\n".join(lines))
+        self._redraw()
+
+    def _cleanup_failed(self, gen, message):
+        self._cleanup_thread_ended()
+        if gen == self._cleanup_gen:
+            self.cleanup_info.setText("Preview failed: " + message)
+
+    def _weights(self):
+        return [len(c) / max(len(p), 1) for c, p in zip(self.clouds, self.previews)]
+
     # ---------------------------------------------------------------- view
 
     def _redraw(self, *_):
@@ -945,10 +1098,26 @@ class MainWindow(QMainWindow):
                 color = error_colours(self.quality.point_error[i], self.quality.scale_max)
             else:
                 color = (*PALETTE[i % len(PALETTE)], 1.0)
-            sc = gl.GLScatterPlotItem(pos=pts, color=color, size=size, pxMode=True)
-            sc.setGLOptions("opaque")
-            self.view.addItem(sc)
-            self._items.append(sc)
+            keep = None
+            if (aligned and self._cleanup_keep is not None
+                    and len(self._cleanup_keep[i]) == len(pts)):
+                keep = self._cleanup_keep[i]
+            if keep is not None and not keep.all():
+                gone = pts[~keep]
+                pts = pts[keep]
+                if isinstance(color, np.ndarray) and color.ndim == 2:
+                    color = color[keep]
+                if self.removed_mode.currentIndex() == 0:
+                    self._add_points(gone, REMOVED_COLOUR, size + 1)
+            self._add_points(pts, color, size)
+
+    def _add_points(self, pts, color, size):
+        if not len(pts):
+            return
+        sc = gl.GLScatterPlotItem(pos=pts, color=color, size=size, pxMode=True)
+        sc.setGLOptions("opaque")
+        self.view.addItem(sc)
+        self._items.append(sc)
 
     def _fit_view(self):
         self._redraw()
