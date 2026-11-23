@@ -1,0 +1,436 @@
+"""Data side of the first-person fly-through: no Qt or OpenGL in here.
+
+Building-sized scans have tens of millions of points, far more than can be
+drawn every frame. The fly-through therefore works in two steps:
+
+1. :func:`build_scene` (run once, in the background) takes a random subset of
+   up to ``max_points`` points from the clouds, moves them with the alignment
+   transforms and sorts them into *chunks*: cubes of a regular grid. Inside a
+   chunk the points are in random order, so the first k points of a chunk are
+   a random k-point sample of it. For each chunk we also estimate how far apart
+   its points are on the surfaces they sample (``spacing``).
+
+2. :func:`plan_frame` (run every frame) decides how many points of each chunk
+   to draw. Chunks outside the field of view are skipped. For the rest, the
+   fraction drawn is chosen so that, at that chunk's distance, the drawn points
+   are about ``px_target`` pixels apart on screen: close chunks are drawn in
+   full, far chunks only sparsely, and the drawn points are made larger to fill
+   the gaps. If that still exceeds the frame's point budget, everything is
+   scaled down evenly. Fractions are rounded to powers of two so the whole
+   frame is a dozen draw calls, one per level of detail.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+
+DEFAULT_MAX_POINTS = 16_000_000  # points kept on the graphics card
+TARGET_CHUNK_POINTS = 2_000
+LEVELS = 12  # fractions 1, 1/2, ..., 1/2048
+
+COLOUR_MODES = ("Colour (RGB)", "Intensity", "Height", "Per scan")
+
+PALETTE = [
+    (0.95, 0.35, 0.25), (0.25, 0.65, 0.95), (0.35, 0.85, 0.35), (0.95, 0.80, 0.20),
+    (0.75, 0.40, 0.90), (0.20, 0.85, 0.80), (0.95, 0.55, 0.75), (0.65, 0.65, 0.65),
+]
+
+# Interleaved vertex layout uploaded to the graphics card as is.
+VERTEX_DTYPE = np.dtype([("pos", "<f4", 3), ("rgba", "u1", 4), ("spacing", "<f4")])
+
+
+@dataclass
+class Scene:
+    vertices: np.ndarray  # VERTEX_DTYPE, sorted by chunk
+    origin: np.ndarray  # world position of (0, 0, 0) in ``vertices``
+    chunk_start: np.ndarray  # int64, first vertex of each chunk
+    chunk_count: np.ndarray  # int64
+    chunk_centre: np.ndarray  # (C, 3) float32, relative to origin
+    chunk_radius: np.ndarray  # (C,) float32
+    chunk_spacing: np.ndarray  # (C,) float32, typical point spacing on surfaces
+    cell: float
+    lo: np.ndarray  # bounding box (2nd/98th percentile), relative to origin
+    hi: np.ndarray
+    scan_positions: list = field(default_factory=list)  # (name, xyz relative to origin)
+    names: list = field(default_factory=list)
+    total_points: int = 0  # points in the source clouds
+    # Kept to recolour without rebuilding:
+    scan_id: np.ndarray | None = None
+    intensity: np.ndarray | None = None
+    rgb: np.ndarray | None = None
+
+    def __len__(self) -> int:
+        return len(self.vertices)
+
+    @property
+    def colour_modes(self) -> list[str]:
+        modes = []
+        if self.rgb is not None:
+            modes.append("Colour (RGB)")
+        if self.intensity is not None:
+            modes.append("Intensity")
+        modes.append("Height")
+        if len(self.names) > 1:
+            modes.append("Per scan")
+        return modes
+
+    def colours(self, mode: str) -> np.ndarray:
+        """(N, 4) uint8 colours for a colour mode."""
+        n = len(self.vertices)
+        out = np.empty((n, 4), dtype=np.uint8)
+        out[:, 3] = 255
+        if mode == "Colour (RGB)" and self.rgb is not None:
+            out[:, :3] = self.rgb
+        elif mode == "Intensity" and self.intensity is not None:
+            v = self.intensity
+            lo, hi = np.percentile(v, [1, 99]) if n else (0.0, 1.0)
+            v = np.clip((v - lo) / max(hi - lo, 1e-12), 0, 1) ** 0.7
+            # Slightly warm grey reads better than pure grey on a dark background.
+            out[:, 0] = (30 + 225 * v).astype(np.uint8)
+            out[:, 1] = (28 + 222 * v).astype(np.uint8)
+            out[:, 2] = (26 + 214 * v).astype(np.uint8)
+        elif mode == "Per scan" and self.scan_id is not None:
+            pal = (np.array(PALETTE) * 255).astype(np.uint8)
+            out[:, :3] = pal[self.scan_id % len(pal)]
+        else:
+            z = self.vertices["pos"][:, 2]
+            lo, hi = float(self.lo[2]), float(self.hi[2])
+            out[:, :3] = height_colours(z, lo, hi)
+        return out
+
+    def set_colours(self, mode: str) -> None:
+        self.vertices["rgba"] = self.colours(mode)
+
+
+_HEIGHT_STOPS = np.array([
+    (0.00, 40, 60, 160), (0.25, 40, 150, 200), (0.50, 80, 200, 110),
+    (0.75, 235, 210, 60), (1.00, 230, 80, 50),
+], dtype=np.float64)
+
+
+def height_colours(z: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    t = np.clip((np.asarray(z, dtype=np.float64) - lo) / max(hi - lo, 1e-12), 0, 1)
+    s = _HEIGHT_STOPS
+    return np.stack([np.interp(t, s[:, 0], s[:, k]) for k in (1, 2, 3)], 1).astype(np.uint8)
+
+
+def _unpack_rgb(col: np.ndarray) -> np.ndarray:
+    if col.dtype.itemsize != 4:
+        col = col.astype(np.uint32)
+    v = np.ascontiguousarray(col).view(np.uint32)
+    return np.stack([(v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF], 1).astype(np.uint8)
+
+
+def _rgb_of(data: np.ndarray) -> np.ndarray | None:
+    names = data.dtype.names
+    for n in ("rgb", "rgba"):
+        if n in names and data[n].ndim == 1:
+            return _unpack_rgb(data[n])
+    if all(n in names for n in ("red", "green", "blue")):
+        cols = [data[n].astype(np.float64) for n in ("red", "green", "blue")]
+        top = max(float(c.max()) if len(c) else 0.0 for c in cols)
+        scale = 255.0 / 65535.0 if top > 255 else 1.0
+        return np.stack([np.clip(c * scale, 0, 255) for c in cols], 1).astype(np.uint8)
+    return None
+
+
+def _scanner_position(cloud, xyz_local: np.ndarray) -> np.ndarray | None:
+    """The scanner's position in the cloud's own frame, if the PCD VIEWPOINT is
+    believable (the scan surrounds it), else None."""
+    from .cleanup import plausible_origin
+
+    vp = np.asarray(getattr(cloud, "viewpoint", (0, 0, 0))[:3], dtype=np.float64)
+    try:
+        ok = plausible_origin(xyz_local, vp)
+    except Exception:
+        ok = False
+    return vp if ok else None
+
+
+def _no_progress(msg, frac):
+    pass
+
+
+def build_scene(clouds, transforms=None, max_points: int = DEFAULT_MAX_POINTS,
+                progress=None, seed: int = 0) -> Scene:
+    """Prepare clouds (pcd_io.PointCloud, already loaded) for the fly-through.
+
+    ``transforms`` (4x4 each) move every cloud into the common frame; None
+    means they are already there (a merged cloud, or one scan on its own).
+    """
+    progress = progress or _no_progress
+    if transforms is None:
+        transforms = [np.eye(4)] * len(clouds)
+    rng = np.random.default_rng(seed)
+    total = sum(len(c) for c in clouds)
+    keep_frac = min(1.0, max_points / max(total, 1))
+    want_rgb = all(_rgb_of(c.data[:1]) is not None for c in clouds)
+    want_int = all(c.has_field("intensity") for c in clouds)
+
+    parts, ids, ints, rgbs, positions = [], [], [], [], []
+    for i, (c, t) in enumerate(zip(clouds, transforms)):
+        progress(f"Preparing fly-through: {c.name}", 0.6 * i / len(clouds))
+        d = c.data
+        if keep_frac < 1.0:
+            d = d[rng.random(len(d)) < keep_frac]
+        xyz = np.empty((len(d), 3), dtype=np.float64)
+        xyz[:, 0], xyz[:, 1], xyz[:, 2] = d["x"], d["y"], d["z"]
+        ok = np.isfinite(xyz).all(axis=1)
+        if not ok.all():
+            xyz, d = xyz[ok], d[ok]
+        t = np.asarray(t, dtype=np.float64)
+        vp = _scanner_position(c, xyz[:: max(1, len(xyz) // 200_000)])
+        if vp is not None:
+            positions.append((c.name, t[:3, :3] @ vp + t[:3, 3]))
+        parts.append(xyz @ t[:3, :3].T + t[:3, 3])
+        ids.append(np.full(len(xyz), i, dtype=np.uint8 if len(clouds) < 256 else np.uint16))
+        if want_int:
+            ints.append(np.asarray(d["intensity"], dtype=np.float32).reshape(len(d), -1)[:, 0])
+        if want_rgb:
+            rgbs.append(_rgb_of(d))
+
+    xyz = np.concatenate(parts) if parts else np.zeros((0, 3))
+    del parts
+    n = len(xyz)
+    if n == 0:
+        raise ValueError("there are no points to show")
+    progress("Preparing fly-through: sorting into chunks", 0.65)
+    lo_w = np.percentile(xyz[:: max(1, n // 500_000)], 2, axis=0)
+    hi_w = np.percentile(xyz[:: max(1, n // 500_000)], 98, axis=0)
+    origin = (lo_w + hi_w) / 2
+    rel = (xyz - origin).astype(np.float32)
+    del xyz
+
+    cell = _pick_cell(rel, rng)
+    keys, inverse = _chunk_keys(rel, cell)
+    # Sort by chunk, with random low bits so the order inside a chunk is random.
+    sort_key = (inverse.astype(np.int64) << 24) | rng.integers(0, 1 << 24, n, dtype=np.int64)
+    order = np.argsort(sort_key)
+    del sort_key
+    progress("Preparing fly-through: measuring point spacing", 0.8)
+    inv_sorted = inverse[order]
+    counts = np.bincount(inv_sorted, minlength=len(keys)).astype(np.int64)
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    rel = rel[order]
+
+    centre, radius = _chunk_bounds(rel, inv_sorted, counts, len(keys))
+    spacing = _chunk_spacing(rel, inv_sorted, counts, cell)
+
+    verts = np.empty(n, dtype=VERTEX_DTYPE)
+    verts["pos"] = rel
+    verts["spacing"] = spacing[inv_sorted]
+    del rel
+
+    scene = Scene(
+        vertices=verts, origin=origin, chunk_start=starts, chunk_count=counts,
+        chunk_centre=centre, chunk_radius=radius, chunk_spacing=spacing, cell=cell,
+        lo=(lo_w - origin).astype(np.float32), hi=(hi_w - origin).astype(np.float32),
+        scan_positions=[(name, (p - origin).astype(np.float32)) for name, p in positions],
+        names=[c.name for c in clouds], total_points=total,
+        scan_id=np.concatenate(ids)[order],
+        intensity=np.concatenate(ints)[order] if want_int else None,
+        rgb=np.concatenate(rgbs)[order] if want_rgb else None,
+    )
+    progress("Preparing fly-through: colours", 0.95)
+    scene.set_colours(scene.colour_modes[0])
+    return scene
+
+
+def _chunk_keys(rel: np.ndarray, cell: float):
+    g = np.floor(rel / cell).astype(np.int64)
+    g -= g.min(axis=0)
+    dims = g.max(axis=0) + 1
+    flat = (g[:, 0] * dims[1] + g[:, 1]) * dims[2] + g[:, 2]
+    return np.unique(flat, return_inverse=True)
+
+
+def _pick_cell(rel: np.ndarray, rng) -> float:
+    """Grid size giving about TARGET_CHUNK_POINTS points per occupied cube."""
+    n = len(rel)
+    ext = float(np.max(np.ptp(rel, axis=0))) or 1.0
+    if n <= TARGET_CHUNK_POINTS:
+        return ext + 1e-3
+    sample = rel[rng.integers(0, n, 400_000)] if n > 400_000 else rel
+    cell = ext / 32
+    for _ in range(3):
+        per = n / len(_chunk_keys(sample, cell)[0])
+        # Points sample surfaces, so points per cube grows with the cube's area.
+        cell *= float(np.clip(np.sqrt(TARGET_CHUNK_POINTS / max(per, 1e-9)), 0.25, 4.0))
+    return max(cell, ext / 2000)
+
+
+def _chunk_bounds(rel, inv, counts, c):
+    sums = np.stack([np.bincount(inv, weights=rel[:, k], minlength=c) for k in range(3)], 1)
+    centre = (sums / np.maximum(counts, 1)[:, None]).astype(np.float32)
+    d = np.linalg.norm(rel - centre[inv], axis=1)
+    radius = np.zeros(c, dtype=np.float32)
+    np.maximum.at(radius, inv, d)
+    return centre, radius
+
+
+def _chunk_spacing(rel, inv, counts, cell, sub: int = 16):
+    """Typical distance between neighbouring points in each chunk.
+
+    The chunk's surface area is estimated from how many cubes of a finer grid
+    (``sub`` per chunk side) contain points; spacing = sqrt(area / points).
+    """
+    fine = cell / sub
+    g = np.floor(rel / fine).astype(np.int64) % sub
+    key = inv.astype(np.int64) * (sub ** 3) + (g[:, 0] * sub + g[:, 1]) * sub + g[:, 2]
+    occupied = np.bincount(np.unique(key) // (sub ** 3), minlength=len(counts))
+    area = occupied * fine * fine
+    return np.sqrt(area / np.maximum(counts, 1)).astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# Per frame
+
+
+@dataclass
+class FramePlan:
+    # One entry per level of detail actually used.
+    levels: list  # of (size_factor, firsts int32 array, counts int32 array)
+    points: int
+
+
+def frustum_planes(mvp: np.ndarray) -> np.ndarray:
+    """(6, 4) normalised planes ax+by+cz+d >= 0 inside, from a view-projection
+    matrix acting on column vectors."""
+    m = np.asarray(mvp, dtype=np.float64)
+    planes = np.array([m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1],
+                       m[3] + m[2], m[3] - m[2]])
+    planes /= np.linalg.norm(planes[:, :3], axis=1, keepdims=True)
+    return planes
+
+
+def plan_frame(scene: Scene, eye: np.ndarray, mvp: np.ndarray, focal_px: float,
+               budget: int, px_target: float = 1.5) -> FramePlan:
+    """How many points of each chunk to draw this frame (see module docstring)."""
+    c = scene.chunk_centre.astype(np.float64)
+    r = scene.chunk_radius.astype(np.float64)
+    planes = frustum_planes(mvp)
+    vis = np.all(c @ planes[:, :3].T + planes[:, 3] >= -r[:, None], axis=1)
+    idx = np.flatnonzero(vis)
+    if len(idx) == 0:
+        return FramePlan([], 0)
+    dist = np.maximum(np.linalg.norm(c[idx] - eye, axis=1) - r[idx], 1e-3)
+    counts = scene.chunk_count[idx].astype(np.float64)
+    sp = np.maximum(scene.chunk_spacing[idx].astype(np.float64), 1e-9)
+    # Spacing on screen we want, turned into a spacing in the world at that
+    # distance; a chunk's points, thinned to fraction f, are sp / sqrt(f) apart.
+    want = dist * px_target / max(focal_px, 1.0)
+    frac = np.minimum(1.0, (sp / want) ** 2)
+    total = float(np.sum(frac * counts))
+    if total > budget:
+        frac *= budget / total
+        # Chunks capped at 1 above don't change; one correction step is plenty.
+        frac = np.minimum(frac, 1.0)
+    level = np.clip(np.round(-np.log2(np.maximum(frac, 2.0 ** -(LEVELS - 1)))), 0, LEVELS - 1)
+    level = level.astype(np.int64)
+    n_draw = np.maximum(1, np.ceil(counts * 0.5 ** level)).astype(np.int64)
+    out, drawn = [], 0
+    starts = scene.chunk_start[idx]
+    for lv in np.unique(level):
+        m = level == lv
+        firsts = starts[m].astype(np.int32)
+        cnt = n_draw[m].astype(np.int32)
+        drawn += int(cnt.sum())
+        out.append((float(np.sqrt(2.0 ** lv)), firsts, cnt))
+    return FramePlan(out, drawn)
+
+
+# --------------------------------------------------------------------------
+# Camera
+
+
+@dataclass
+class FlyCamera:
+    """First-person camera, Z up. Yaw 0 looks along +X, pitch up is positive."""
+
+    pos: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    yaw: float = 0.0  # degrees
+    pitch: float = 0.0
+    fov: float = 75.0  # vertical, degrees
+    near: float = 0.05
+    far: float = 1000.0
+
+    def forward(self) -> np.ndarray:
+        y, p = np.radians(self.yaw), np.radians(self.pitch)
+        return np.array([np.cos(p) * np.cos(y), np.cos(p) * np.sin(y), np.sin(p)])
+
+    def right(self) -> np.ndarray:
+        y = np.radians(self.yaw)
+        return np.array([np.sin(y), -np.cos(y), 0.0])
+
+    def look(self, dx_deg: float, dy_deg: float) -> None:
+        self.yaw = (self.yaw - dx_deg) % 360.0
+        self.pitch = float(np.clip(self.pitch - dy_deg, -89.0, 89.0))
+
+    def look_at(self, target) -> None:
+        d = np.asarray(target, dtype=np.float64) - self.pos
+        if np.linalg.norm(d) < 1e-9:
+            return
+        self.yaw = float(np.degrees(np.arctan2(d[1], d[0]))) % 360.0
+        self.pitch = float(np.degrees(np.arctan2(d[2], np.hypot(d[0], d[1]))))
+
+    def move(self, forward: float, right: float, up: float, follow_look: bool = False) -> None:
+        """Move by distances along the view (horizontal unless ``follow_look``),
+        to the right, and straight up."""
+        f = self.forward()
+        if not follow_look:
+            f = np.array([f[0], f[1], 0.0])
+            n = np.linalg.norm(f)
+            f = f / n if n > 1e-9 else np.array([np.cos(np.radians(self.yaw)),
+                                                 np.sin(np.radians(self.yaw)), 0.0])
+        self.pos = self.pos + forward * f + right * self.right() + up * np.array([0, 0, 1.0])
+
+    def view_matrix(self) -> np.ndarray:
+        f = self.forward()
+        s = np.cross(f, [0.0, 0.0, 1.0])
+        s /= np.linalg.norm(s)
+        u = np.cross(s, f)
+        m = np.eye(4)
+        m[0, :3], m[1, :3], m[2, :3] = s, u, -f
+        m[:3, 3] = -m[:3, :3] @ self.pos
+        return m
+
+    def projection_matrix(self, aspect: float) -> np.ndarray:
+        t = 1.0 / np.tan(np.radians(self.fov) / 2)
+        n, f = self.near, self.far
+        m = np.zeros((4, 4))
+        m[0, 0] = t / max(aspect, 1e-6)
+        m[1, 1] = t
+        m[2, 2] = (f + n) / (n - f)
+        m[2, 3] = 2 * f * n / (n - f)
+        m[3, 2] = -1.0
+        return m
+
+    def focal_px(self, height_px: float) -> float:
+        return height_px / 2 / np.tan(np.radians(self.fov) / 2)
+
+
+def start_camera(scene: Scene) -> FlyCamera:
+    """Where the walk starts: the first scanner position if known (that is
+    inside the building, at tripod height), else above the middle of the scan
+    looking at it."""
+    diag = float(np.linalg.norm(scene.hi - scene.lo)) or 1.0
+    cam = FlyCamera(near=max(diag * 1e-5, 0.01), far=max(diag * 4, 10.0))
+    if scene.scan_positions:
+        cam.pos = np.asarray(scene.scan_positions[0][1], dtype=np.float64).copy()
+        centre = (scene.lo + scene.hi) / 2
+        cam.look_at([centre[0], centre[1], cam.pos[2]])
+    else:
+        centre = (scene.lo.astype(np.float64) + scene.hi) / 2
+        cam.pos = np.array([centre[0], scene.lo[1] - 0.3 * diag, centre[2] + 0.3 * diag])
+        cam.look_at(centre)
+    return cam
+
+
+def default_speed(scene: Scene) -> float:
+    """Walking pace in scan units per second (scans are usually in metres)."""
+    diag = float(np.linalg.norm(scene.hi - scene.lo))
+    if 5 <= diag <= 3000:
+        return 2.0
+    return max(diag / 30, 1e-3)

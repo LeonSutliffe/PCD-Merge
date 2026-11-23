@@ -40,6 +40,7 @@ from . import __version__
 from .cleanup import CleanupOptions
 from .exporters import FORMATS, file_filter
 from .files import already_merged, find_pcd_files, read_manifest, save_merged
+from .flyscene import build_scene
 from .pcd_io import PointCloud, read_pcd
 from .quality import (NO_OVERLAP, QualityReport, assess, colour_stops, error_colours,
                       fmt_distance)
@@ -409,6 +410,13 @@ class MainWindow(QMainWindow):
         b_fit = QPushButton("Reset view")
         b_fit.clicked.connect(self._fit_view)
         top.addWidget(b_fit)
+        self.b_fly = QPushButton("Walk through…")
+        self.b_fly.setToolTip(
+            "Open a first-person view and walk or fly around inside the scan (W A S D and "
+            "the mouse). Shows the clouds as in this view: aligned, or in their original "
+            "positions. To walk through a merged file, load just that file.")
+        self.b_fly.clicked.connect(self._fly_through)
+        top.addWidget(self.b_fly)
         rv.addLayout(top)
 
         if HAVE_GL:
@@ -473,6 +481,7 @@ class MainWindow(QMainWindow):
         self.rb_aligned.setEnabled(self.result is not None)
         self.colour_mode.setEnabled(self.quality is not None)
         self.drop_hint.setVisible(n == 0)
+        self.b_fly.setEnabled(not busy and n > 0 and HAVE_GL)
 
     def _set_status(self, msg: str, frac: float | None = None):
         self.status.setText(msg)
@@ -895,6 +904,35 @@ class MainWindow(QMainWindow):
 
         self.view.setCameraPosition(pos=Vector(*centre), distance=float(np.linalg.norm(hi - lo)) * 1.1,
                                     elevation=35, azimuth=-60)
+
+
+    # ---------------------------------------------------------------- fly-through
+
+    def _fly_through(self):
+        shown = [i for i in range(len(self.clouds))
+                 if (it := self.file_list.item(i)) is None or it.checkState() == Qt.Checked]
+        if not shown:
+            return
+        aligned = self.rb_aligned.isChecked() and self.result is not None
+        transforms = [self.result.transforms[i] if aligned else np.eye(4) for i in shown]
+        clouds = [self.clouds[i] for i in shown]
+        self._fly_title = ("Walk through: " + ", ".join(c.name for c in clouds[:3])
+                           + (f" and {len(clouds) - 3} more" if len(clouds) > 3 else "")
+                           + (" (aligned)" if aligned and len(clouds) > 1 else ""))
+        self._run(build_scene, (clouds, transforms), self._fly_ready, "Preparing walk-through…")
+
+    def _fly_ready(self, scene):
+        from .flythrough import FlyThroughWindow
+
+        old = getattr(self, "_fly_win", None)
+        if old is not None:
+            try:
+                old.close()
+            except RuntimeError:  # already deleted
+                pass
+        self._fly_win = FlyThroughWindow(scene, self._fly_title, parent=self)
+        self._fly_win.show()
+        self._set_status("Walk-through open. Click into it, then use W A S D and the mouse.")
 
 
 def _fmt_secs(secs: float) -> str:
