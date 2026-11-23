@@ -241,10 +241,24 @@ Rules:
 * Automatic floor plan extraction (walls and openings from a slice).
 * Plane / pipe / cylinder fitting, wall flatness and floor levelness maps.
 * Georeferencing with surveyed control points, coordinate systems.
-* Panoramic photo colourising (if the sensor has a camera).
 * GPU acceleration (shelved; CPU is already fast enough on Leon's PC).
 * Plug-ins or scripting, a headless server mode.
 * macOS / Linux builds.
+
+### Far future
+
+* **Colour from a camera.** Point colour (RGB) is already kept through
+  align, merge, export and shown in the walk-through when a scan has it. If a
+  camera is added to the device: colour points from its photos (camera
+  calibration, timing sync, picking the best photo per point), exposure
+  matching between scans, and 360° photo bubbles at each scan position in the
+  walk-through.
+* Scan-to-BIM: walls, floors, doors and windows as objects for Revit/IFC.
+* Progress tracking across many visits (timeline slider in Inspect).
+* Live alignment while scanning (scans streamed from the device as they are
+  taken).
+* Collaboration: share a project, comments on points, cloud hosting of the
+  viewing file for clients.
 
 ## Suggested release path
 
@@ -271,16 +285,33 @@ side.
 * Clients must be able to open the Inspect file without the app: COPC.
 * A split creates parts of the project, not new scans.
 
+## Site size (Leon, 2026-11-23)
+
+Design for sites up to **200 m x 200 m x 200 m**. Depending on scan density
+that is roughly 0.5 to several billion points in total, far more than today's
+in-memory path (35.5M points in about 10 s) or the walk-through's 16M points on
+the graphics card. So for 1.0:
+
+* **Edit and Inspect must stream from disk** (the COPC octree), never load the
+  whole site into memory or onto the GPU.
+* **Merge and export must work in chunks** (out of core): apply each scan's
+  transform and deletions and write it out piece by piece, instead of building
+  one huge array.
+* **Alignment is fine as it is**: it already works on downsampled copies.
+* A synthetic 1-billion-point benchmark joins the CI benchmarks.
+
 ## Open questions for Leon
 
-1. **Who uses it, and what do they hand over?** A clean cloud for other
-   software, measurements, floor plans, notes with photos, or a comparison
-   between visits? This decides what comes after 1.0.
-2. **Code signing.** A certificate costs roughly a few hundred dollars a year
-   (Azure Trusted Signing is cheaper). More relevant now that clients may
-   install the viewer.
-3. **Scan sizes to design for.** How many scans and points in your biggest
-   site? It sets how hard the streaming and level-of-detail work needs to be.
+1. **Who uses it, and what do they hand over?** Only you, processing your own
+   scans, or other people too (architects, surveyors, building managers,
+   clients)? And what is the end product: the cloud itself for other
+   software, measurements, floor plans, or a walk-through for a client? This
+   decides what comes after 1.0.
+2. **Code signing.** Free route: SignPath Foundation signs open-source
+   projects at no cost, from GitHub Actions. It needs the repository public
+   with an open-source licence (there is no LICENSE file yet). Cheapest paid
+   routes: Certum open-source certificate or Azure Trusted Signing, both low
+   cost per year.
 
 ## Technical risk to check first
 
