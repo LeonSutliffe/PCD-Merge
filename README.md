@@ -41,7 +41,8 @@ not be matched at all. In that case press **Retry**. Each press tries something
 different: a coarser voxel size (1.5×, then 2×, then 3× the first try) with
 more search attempts, which helps with repetitive or low-detail scenes. Every
 try is graded on the same scale as the first, and the best result so far is
-the one shown and merged. Press **Align** to start over.
+the one shown and merged: best grade first, then the smallest offset (see the
+quality report below), so moved objects can't make a worse alignment win. Press **Align** to start over.
 
 ## Install on Windows (no Python needed)
 
@@ -117,6 +118,37 @@ closer than that. Original points are kept, not averaged, so intensity and the
 other fields stay exactly as measured. The default, *Full resolution*, saves
 every point.
 
+### Walk-through (first person)
+
+Press **Walk through…** above the 3D view to open the scan in a first-person
+window and walk or fly around inside it. It shows what the 3D view shows: the
+aligned clouds after **Align** (or their original positions), and only the
+files that are ticked. To walk through a merged file you saved earlier, load
+just that file and press **Walk through…**.
+
+| | |
+|---|---|
+| W A S D or arrow keys | move (level, like walking) |
+| Mouse | look around: click into the view first (Esc gives the mouse back), or drag |
+| Space / E, C / Q | up, down |
+| Shift, Ctrl | 4x faster, 4x slower while held |
+| Mouse wheel | change the walking speed |
+| 1 to 9 | jump to where scan 1 to 9 was taken |
+| Home | back to the start |
+
+The walk starts where the first scan was taken (from its PCD `VIEWPOINT`), so
+you begin inside the building at tripod height. **Fly where I look** makes W
+move in the direction you are looking instead of level. **Colour** offers the
+scan's RGB colours if it has them, intensity, height, or one colour per scan.
+
+Large scans stay smooth because not every point is drawn every frame. Up to
+16 million points are kept on the graphics card, sorted into small cubes.
+Nearby cubes are drawn in full; further away fewer points are drawn, and drawn
+larger, so they still look solid. Cubes behind you are skipped. While you move,
+the number of points drawn is lowered automatically if the frame rate drops,
+and the full detail comes back as soon as you stop. **Detail** sets how many
+points it aims for; lower it on a slower graphics card.
+
 ### Output formats
 
 | Format | Opens in | What is kept |
@@ -141,24 +173,36 @@ and faster, smaller is more precise. It never affects which points are merged.
 After aligning, the app measures how well the clouds agree, using the final
 transforms (what will actually be merged):
 
-* **Per pair:** overlap (share of points with a match in the other cloud) and
-  the RMSE, median and 90th percentile of the distance between them.
-* **Grade:** *Good* when the RMSE is within 0.15 x the voxel size and at least
-  30% overlaps; *Fair* up to 0.3 x voxel and 15% overlap; otherwise *Poor*.
-  The overall grade is the worst overlapping pair. Merging a *Poor* result asks
-  for confirmation first.
+* **Per pair:** overlap (share of points with a match in the other cloud), the
+  **offset** (how far the clouds still are from their best fit, i.e. the
+  estimated misalignment), the **fit** (RMS distance between the points that
+  match) and how much of the overlap **changed** between the scans.
+* **Grade:** *Good* when the offset is within 0.2 x the voxel size, at least
+  30% overlaps and at least 60% of the overlap matches; *Fair* up to 0.5 x
+  voxel, 15% overlap and 40% matching; otherwise *Poor*. The overall grade is
+  the worst overlapping pair. Merging a *Poor* result asks for confirmation
+  first.
 * **Heatmap:** set *Colour* to *Alignment error* to colour every point by its
-  distance to the other clouds. Blue fits, red is off by the value on the scale
-  or more, grey was seen by only one scan (not an error). The app switches to
-  the heatmap by itself when the grade is not *Good*.
+  distance to the other clouds. Blue fits, red is at the end of the scale,
+  magenta *changed* means the scans disagree there by more than that, and grey
+  was seen by only one scan (not an error). The app switches to the heatmap by
+  itself when the grade is not *Good*.
 
 Distances are point-to-plane (to the other cloud's local surface, not its
 nearest point), so two scans of the same wall read close to the sensor noise
 even though their points never coincide. Points further away than 1.5 x the
-voxel size count as not overlapping, so a badly wrong alignment shows up as low
-overlap rather than high RMSE.
+voxel size count as not overlapping.
 
-![Heatmap of a deliberately misaligned pair: walls and poles turn red](docs/quality-heatmap.png)
+**Moved objects don't count against the grade.** A car that left, a person
+walking through or a door that opened makes the scans disagree in that spot,
+but says nothing about the alignment. The offset comes from a robust ICP
+(Tukey loss) started at the result: it ignores points that don't fit, so it
+measures how far the *static* parts are off. Changed points (magenta) are also
+left out of the fit. A real misalignment moves everything, so it still shows
+up in the offset, and in walls and poles turning magenta along their whole
+length rather than in a few separate objects.
+
+![Heatmap of two well aligned scans where cars, people and a van moved: those show as magenta, the grade stays Good](docs/quality-heatmap.png)
 
 ### Clean-up while merging (optional)
 
@@ -220,8 +264,7 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned: GPU acceleration for very large scans (NVIDIA), and a first-person
-  walk-through view for building-sized scans.
+* Planned: GPU acceleration for very large scans (NVIDIA).
 * Planned: a manual fallback where you pick a few matching points in two clouds
   to give the alignment a start.
 

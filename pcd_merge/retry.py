@@ -14,8 +14,6 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
-import numpy as np
-
 from .quality import GRADES
 from .registration import AlignSettings
 
@@ -56,17 +54,14 @@ def settings_for(base: AlignSettings, base_voxel: float, press: int,
 
 
 def score(result, quality) -> tuple:
-    """Bigger is better. Grade first, then how many clouds joined up, then how
-    much the pairs overlap (in 5% steps, so noise doesn't decide), then the
-    smaller surface distance (a finer, more precise result wins a tie)."""
-    used = [p for p in quality.pairs if p.overlaps]
-    overlap = float(np.mean([p.overlap for p in used])) if used else 0.0
-    rmse = [p.rmse for p in used if np.isfinite(p.rmse)]
+    """Bigger is better. Grade first, then how many clouds joined up, then
+    :attr:`quality.QualityReport.score`, which ranks by the estimated
+    misalignment (offset), then agreement, then overlap. Moved objects don't
+    affect any of these, so they can't make a worse alignment win."""
     return (
         -GRADES.index(quality.grade),
         int(sum(bool(c) for c in result.connected)),
-        round(overlap / 0.05),
-        -float(np.mean(rmse)) if rmse else float("-inf"),
+        round(float(quality.score), 6),
     )
 
 

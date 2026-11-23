@@ -89,8 +89,16 @@ def run(log_path: str | None = None) -> int:
         app = QApplication.instance() or QApplication([sys.argv[0]])
         w = MainWindow()
         w.close()
-        del app
         log(f"GUI ok (3D preview available: {HAVE_GL})")
+
+        from .flyscene import build_scene
+        from .flythrough import FlyThroughWindow
+
+        fly = FlyThroughWindow(build_scene(clouds, r.transforms), "self-test")
+        log(f"walk-through ok: {len(fly.scene):,} points, "
+            f"{len(fly.scene.scan_positions)} scan positions")
+        fly.close()
+        del app
         ok = True
     except Exception:
         log("FAILED\n" + traceback.format_exc())
