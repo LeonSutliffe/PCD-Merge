@@ -20,6 +20,8 @@ on:
       - "pcd_merge/selftest.py"
       - "pcd_merge/cli.py"
       - "pcd_merge/__main__.py"
+      - "pcd_merge/gpu.py"
+      - "pcd_merge/benchmark.py"
   push:
     branches: [main]
     paths:
@@ -32,7 +34,14 @@ on:
       - "pcd_merge/selftest.py"
       - "pcd_merge/cli.py"
       - "pcd_merge/__main__.py"
+      - "pcd_merge/gpu.py"
+      - "pcd_merge/benchmark.py"
   workflow_dispatch:
+    inputs:
+      publish_test:
+        description: "Also publish the program and GPU add-on as a test pre-release (installed copies ignore pre-releases)"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       version:
@@ -43,6 +52,9 @@ on:
       zip:
         description: "File name of the built zip (uploaded as an artifact of the same name)"
         value: ${{ jobs.build.outputs.zip }}
+      addon_zip:
+        description: "File name of the GPU add-on zip (uploaded as an artifact of the same name)"
+        value: ${{ jobs.gpu-addon.outputs.zip }}
 
 permissions:
   contents: read
@@ -122,3 +134,90 @@ jobs:
           name: ${{ steps.zip.outputs.name }}
           path: ${{ steps.zip.outputs.name }}
           retention-days: 14
+
+  # Optional NVIDIA GPU support (CuPy + CUDA runtime/NVRTC DLLs), ~180 MB, kept
+  # out of the main zip. Users unzip it into %LOCALAPPDATA%\PCD Merge\ (it
+  # holds a "gpu" folder). The runner has no GPU, so the test only checks that
+  # the bundled program can load it and reports "no NVIDIA GPU".
+  gpu-addon:
+    needs: build
+    runs-on: windows-latest
+    outputs:
+      zip: ${{ steps.zip.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.zip }}
+      - name: Unpack the program
+        shell: bash
+        run: 7z x -y "${{ needs.build.outputs.zip }}" -oapp > /dev/null
+      - name: Build the add-on
+        shell: bash
+        run: |
+          mkdir -p gpu/site gpu/cuda/bin wheels
+          # Python packages, without numpy: the program brings its own.
+          python -m pip install --no-deps --target gpu/site \
+            "cupy-cuda12x==14.*" "cuda-pathfinder==1.*" fastrlock
+          # CUDA runtime and NVRTC (CuPy compiles its kernels at run time).
+          python -m pip download --no-deps --only-binary=:all: -d wheels \
+            --platform win_amd64 "nvidia-cuda-runtime-cu12==12.*" "nvidia-cuda-nvrtc-cu12==12.*"
+          for w in wheels/*.whl; do 7z x -y "$w" -owheels/x > /dev/null; done
+          find wheels/x -name "*.dll" -exec cp {} gpu/cuda/bin/ \;
+          rm -rf gpu/site/bin gpu/site/*.dist-info/RECORD
+          ls gpu/cuda/bin
+          du -sh gpu
+      - name: Check the program loads the add-on
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse gpu "app\PCD Merge\gpu"
+          $log = Join-Path $env:TEMP "pcd-merge-gpu.log"
+          $p = Start-Process -FilePath "app\PCD Merge\PCD Merge.exe" -ArgumentList "--gpu-info" -Wait -PassThru
+          Get-Content $log
+          if ($p.ExitCode -ne 0) { throw "--gpu-info failed with exit code $($p.ExitCode)" }
+          $text = Get-Content $log -Raw
+          if ($text -match "could not be loaded|add-on not installed") { throw "the program could not load the GPU add-on" }
+      - name: Zip
+        id: zip
+        shell: bash
+        run: |
+          # no "windows" in the name: older installed copies pick the first "windows*.zip"
+          # asset of a release as the program itself
+          name="PCD-Merge-GPU-addon-x64.zip"
+          7z a -tzip -mx=7 "$name" gpu > /dev/null
+          ls -la "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.name }}
+          path: ${{ steps.zip.outputs.name }}
+          retention-days: 14
+
+  # Run by hand (Run workflow, tick "publish_test") to get public download
+  # links for trying a branch, e.g. the GPU benchmark on a real NVIDIA PC.
+  # Pre-releases are not offered as updates to installed copies.
+  test-prerelease:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_test
+    needs: [build, gpu-addon]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.zip }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.gpu-addon.outputs.zip }}
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="test-${GITHUB_REF_NAME//\//-}-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --target "$GITHUB_SHA" --title "Test build: $GITHUB_REF_NAME (#$GITHUB_RUN_NUMBER)" \
+            --notes "Test build of branch $GITHUB_REF_NAME, not an update. Delete when done." \
+            "${{ needs.build.outputs.zip }}" "${{ needs.gpu-addon.outputs.zip }}"

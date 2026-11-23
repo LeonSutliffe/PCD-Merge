@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__
+from . import __version__, gpu
 from .cleanup import CleanupOptions
 from .exporters import FORMATS, file_filter
 from .files import already_merged, find_pcd_files, read_manifest, save_merged
@@ -729,6 +729,7 @@ class MainWindow(QMainWindow):
             lines += ["", "Warnings:"] + ["  " + w for w in warns]
         if warns or grade != "Good":
             lines += ["", "Try Retry, or a larger voxel size."]
+        lines += ["", f"Computed on: {gpu.status().describe()}"]
         self.report.setPlainText("\n".join(lines))
         self.legend_hi.setText(f"≥ {fmt_distance(quality.scale_max)}")
         self.rb_aligned.setChecked(True)

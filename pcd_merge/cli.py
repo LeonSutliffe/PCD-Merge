@@ -58,6 +58,15 @@ def _parse(argv):
                    help="merge the clouds that aligned and leave out the ones that did not")
     p.add_argument("--selftest", action="store_true",
                    help="run a quick end-to-end check of this installation and exit")
+    p.add_argument("--benchmark", action="store_true",
+                   help="time alignment and merging on large synthetic scans, on the CPU "
+                   "and (if available) the NVIDIA GPU, and exit")
+    p.add_argument("--points", type=int, default=10_000_000,
+                   help="points per synthetic scan for --benchmark (default 10 million)")
+    p.add_argument("--clouds", type=int, default=3,
+                   help="number of synthetic scans for --benchmark (2 to 4, default 3)")
+    p.add_argument("--gpu-info", action="store_true",
+                   help="say whether the NVIDIA GPU would be used, and exit")
     return p.parse_args(argv)
 
 
@@ -67,6 +76,14 @@ def main(argv=None) -> int:
         from .selftest import run as selftest
 
         return selftest()
+    if args.benchmark:
+        from .benchmark import run as benchmark
+
+        return benchmark(points=args.points, clouds=args.clouds)
+    if args.gpu_info:
+        from .benchmark import gpu_info
+
+        return gpu_info()
     if not args.files and not args.add_to:
         from .gui import run
 

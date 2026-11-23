@@ -40,6 +40,23 @@ for pkg in ("laspy", "lazrs", "pye57"):
 binaries = [e for e in binaries if _keep(e)]
 hiddenimports = [h for h in hiddenimports if not h.startswith(("open3d.ml", "open3d._ml3d"))]
 hiddenimports += ["lzf", "pyqtgraph.opengl", "OpenGL.platform.win32", "OpenGL.arrays.numpymodule"]
+# The optional GPU add-on (CuPy, loaded from %LOCALAPPDATA%\PCD Merge\gpu at
+# run time, see pcd_merge/gpu.py) is not part of this bundle, so the standard
+# library modules it needs must be included explicitly.
+from PyInstaller.utils.hooks import collect_submodules  # noqa: E402
+
+for _std in ("email", "importlib.metadata", "importlib.resources", "json", "zipfile",
+             "ctypes", "multiprocessing", "concurrent.futures"):
+    hiddenimports += collect_submodules(_std)
+hiddenimports += [
+    "array", "ast", "atexit", "base64", "binascii", "bisect", "bz2", "calendar",
+    "contextvars", "copy", "csv", "dataclasses", "datetime", "dis", "gc", "glob",
+    "graphlib", "hashlib", "inspect", "linecache", "locale", "lzma", "numbers", "opcode",
+    "pickle", "platform", "quopri", "random", "select", "selectors", "shutil", "signal",
+    "socket", "string", "struct", "subprocess", "sysconfig", "tempfile", "textwrap",
+    "token", "tokenize", "traceback", "typing", "weakref", "zlib", "decimal", "fractions",
+    "heapq", "pprint", "queue", "uuid", "warnings", "winreg", "_winapi", "msvcrt",
+]
 
 # Large parts of Qt and optional extras we never use.
 excludes = [

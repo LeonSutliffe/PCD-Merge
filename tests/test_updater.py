@@ -177,3 +177,14 @@ def test_release_digest_is_read():
         "name": "PCD-Merge-1.0.0-windows-x64.zip", "browser_download_url": "u", "size": 5,
         "digest": "sha256:" + "ab" * 32}]})
     assert rel.sha256 == "ab" * 32
+
+
+def test_gpu_addon_asset_is_never_taken_for_the_program():
+    from pcd_merge.updater import release_from_json
+
+    data = {"tag_name": "v0.9.0", "assets": [
+        {"name": "PCD-Merge-GPU-addon-x64.zip", "browser_download_url": "https://x/addon"},
+        {"name": "PCD-Merge-GPU-addon-windows-x64.zip", "browser_download_url": "https://x/a2"},
+        {"name": "PCD-Merge-0.9.0-windows-x64.zip", "browser_download_url": "https://x/app"},
+    ]}
+    assert release_from_json(data).url == "https://x/app"

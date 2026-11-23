@@ -211,8 +211,7 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned: GPU acceleration for very large scans (NVIDIA), and a first-person
-  walk-through view for building-sized scans.
+* Planned: a first-person walk-through view for building-sized scans.
 * Planned: a manual fallback where you pick a few matching points in two clouds
   to give the alignment a start.
 
@@ -232,7 +231,31 @@ in total, 4-core machine), from loading to a saved merged file:
 
 To time your own machine: `python benchmarks/bench_large.py --points 20000000`.
 
-GPU acceleration is not used: the Windows build of Open3D is CPU-only.
+### NVIDIA GPU (optional add-on)
+
+With an NVIDIA graphics card, the heaviest full-resolution step (thinning
+each scan onto the voxel grid used for alignment) can run on the GPU. The
+result is the same as on the CPU. The CUDA libraries this needs are about
+180 MB, so they come as a separate download and the normal program stays
+small:
+
+1. Download `PCD-Merge-GPU-addon-x64.zip` from the release.
+2. Unzip it into `%LOCALAPPDATA%\PCD Merge\` so that the folder
+   `%LOCALAPPDATA%\PCD Merge\gpu` exists. It stays there across updates.
+3. Restart PCD Merge. After aligning, the report ends with
+   "Computed on: GPU: <your card>".
+
+Without the add-on, without an NVIDIA card, or if anything goes wrong on the
+GPU, the program uses the CPU as before. Set `PCD_MERGE_GPU=0` to turn the GPU
+off. A current NVIDIA driver is needed (CUDA 12). When running from source,
+`pip install cupy-cuda12x` takes the add-on's place.
+
+To compare CPU and GPU on your PC, run `"PCD Merge.exe" --benchmark` (optionally
+`--points 20000000`). It opens the timings in Notepad when it is done.
+`--gpu-info` writes whether the GPU would be used to `%TEMP%\pcd-merge-gpu.log`.
+
+Alignment itself (feature matching and ICP) works on about 40,000 points per
+scan and stays on the CPU, because Open3D's Windows build has no GPU support.
 
 ## Releasing a new version
 

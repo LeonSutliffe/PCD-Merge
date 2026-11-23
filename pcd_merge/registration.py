@@ -146,7 +146,15 @@ def voxel_down(xyz: np.ndarray, voxel: float, chunk: int = _DOWN_CHUNK) -> o3d.g
     chunks to one voxel grid; the sentinel sits alone in its voxel and is
     removed. Voxels split across chunks are joined by a final pass, so the
     output has exactly one point per occupied voxel, like Open3D's own.
+
+    With an NVIDIA GPU and the GPU add-on (see :mod:`gpu`), large clouds are
+    downsampled on the GPU instead, on the same grid.
     """
+    from . import gpu  # optional NVIDIA acceleration; None means "use the CPU"
+
+    on_gpu = gpu.try_voxel_down(xyz, voxel)
+    if on_gpu is not None:
+        return to_o3d(on_gpu)
     n = len(xyz)
     if n <= chunk:
         return to_o3d(xyz).voxel_down_sample(voxel)

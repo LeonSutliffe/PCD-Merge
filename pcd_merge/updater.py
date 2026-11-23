@@ -42,7 +42,7 @@ APP_NAME = "PCD Merge"
 EXE_NAME = "PCD Merge.exe"
 LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
-ASSET_PATTERN = re.compile(r"windows.*\.zip$", re.IGNORECASE)
+ASSET_PATTERN = re.compile(r"^(?!.*addon).*windows.*\.zip$", re.IGNORECASE)
 
 ProgressFn = Callable[[int, int], None]  # (bytes done, bytes total)
 
