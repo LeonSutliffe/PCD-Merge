@@ -1,0 +1,6 @@
+numpy>=1.23
+open3d>=0.17
+PySide6>=6.5
+pyqtgraph>=0.13
+PyOpenGL>=3.1
+python-lzf>=0.2.4  # optional: fast binary_compressed PCD support
