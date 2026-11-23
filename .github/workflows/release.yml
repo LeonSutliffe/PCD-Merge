@@ -1,0 +1,132 @@
+name: release
+
+# Publishes a new version for installed copies to pick up. Run it by hand when
+# you're ready (Actions > release > Run workflow), after merging as many PRs as
+# you like. It:
+#   1. works out the next version from the latest release (or uses the one typed in),
+#   2. builds and tests the Windows program with that version stamped in,
+#   3. commits the version bump to main, tags it v<version> and publishes a
+#      GitHub release with the zip. Release notes list the PRs merged since the
+#      previous release.
+# Installed copies offer the update the next time they start.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to raise (0.7.1 -> minor 0.8.0, patch 0.7.2, major 1.0.0)"
+        type: choice
+        options: [minor, patch, major]
+        default: minor
+      version:
+        description: "Or type an exact version (e.g. 0.9.0). Leave empty to use the choice above."
+        type: string
+        default: ""
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - name: Only from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run the release workflow from the main branch."
+          exit 1
+      - uses: actions/checkout@v4
+      - name: Next version
+        id: next
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUMP: ${{ inputs.bump }}
+          WANTED: ${{ inputs.version }}
+        run: |
+          latest=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          latest=${latest#v}
+          code=$(python3 -c 'import re; print(re.search(r"__version__ = \"([^\"]+)\"", open("pcd_merge/__init__.py").read()).group(1))')
+          echo "Latest release: ${latest:-none}; version in code: $code"
+          if [ -n "$WANTED" ]; then
+            next=${WANTED#v}
+          else
+            # bump whichever is higher, the latest release or the version in the code
+            next=$(python3 - "$latest" "$code" "$BUMP" <<'PY'
+          import re, sys
+          def parse(v):
+              n = [int(x) for x in re.findall(r"\d+", v or "")][:3]
+              return tuple(n + [0] * (3 - len(n)))
+          latest, code, bump = sys.argv[1:]
+          base = max(parse(latest), parse(code))
+          major, minor, patch = base
+          if bump == "major":
+              print(f"{major + 1}.0.0")
+          elif bump == "minor":
+              print(f"{major}.{minor + 1}.0")
+          else:
+              print(f"{major}.{minor}.{patch + 1}")
+          PY
+            )
+          fi
+          if ! [[ "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$next' is not a version like 1.2.3"; exit 1
+          fi
+          if [ -n "$latest" ] && ! python3 -c "import sys; p=lambda v: tuple(int(x) for x in v.split('.')[:3]); sys.exit(0 if p('$next') > p('$latest') else 1)"; then
+            echo "::error::$next is not newer than the latest release $latest; installed copies would not update."; exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$next" > /dev/null; then
+            echo "::error::Tag v$next already exists."; exit 1
+          fi
+          echo "Releasing $next"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      ZIP: ${{ needs.build.outputs.zip }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.zip }}
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sed -i -E "s/^__version__ = .*/__version__ = \"$VERSION\"/" pcd_merge/__init__.py
+          git commit -am "Release $VERSION" || echo "Version already $VERSION in the code"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+      - name: Publish release
+        run: |
+          gh release create "v$VERSION" "$ZIP" --verify-tag \
+            --title "PCD Merge $VERSION" --generate-notes
+      - name: Update the version on main
+        run: |
+          # The release is already out; this only keeps pcd_merge/__init__.py on
+          # main in step. If PRs were merged while the release was building,
+          # put the bump on top of them.
+          for i in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git fetch origin main && git rebase origin/main || { git rebase --abort; break; }
+          done
+          echo "::warning::Could not push the version bump to main. The release is published; set __version__ to $VERSION on main by hand."
