@@ -106,11 +106,21 @@ class InspectPanel(QWidget):
         gl_.addWidget(self.b_shot)
         lay.addWidget(g)
 
-        note = QLabel("Coming later in 0.11: a viewing file (COPC) that shows every point at "
-                      "full quality and opens in CloudCompare, QGIS and web viewers too.")
+        # ---- viewing file
+        g = QGroupBox("Viewing file (COPC)")
+        gl_ = QVBoxLayout(g)
+        note = QLabel("One file with every point, arranged so viewers load only what is on "
+                      "screen: it opens at once and stays sharp close up. Send it to anyone: "
+                      "it opens in CloudCompare, QGIS, Potree and viewer.copc.io, and any LAS "
+                      "software reads it as a normal LAZ file. Deleted points and the "
+                      "clean-up set in Edit are left out, as in a merge.")
         note.setWordWrap(True)
         note.setStyleSheet(HINT_STYLE)
-        lay.addWidget(note)
+        gl_.addWidget(note)
+        self.b_copc = QPushButton("Make viewing file…")
+        self.b_copc.clicked.connect(lambda: self.win.align_panel.merge(fmt=".copc.laz"))
+        gl_.addWidget(self.b_copc)
+        lay.addWidget(g)
         lay.addStretch(1)
         self.refresh()
 
@@ -224,6 +234,8 @@ class InspectPanel(QWidget):
         self.b_delete.setEnabled(self.current_id() is not None)
         self.b_csv.setEnabled(bool(self.doc.measurements))
         self.b_shot.setEnabled(self.view.view is not None)
+        doc = self.doc
+        self.b_copc.setEnabled(not busy and (doc.result is not None or len(doc.scans) == 1))
 
     # ---------------------------------------------------------------- saving
 

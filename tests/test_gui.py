@@ -559,3 +559,34 @@ def test_align_by_hand_from_picked_points(window, qtbot, scans):
     assert "placed by hand" in win.align_panel.report.toPlainText()
     assert not box.picking() and view.only is None and not box.fixed_pts
     assert win.align_panel.b_merge.isEnabled()
+
+
+def test_make_viewing_file_from_inspect(window, qtbot, scans, tmp_path, monkeypatch):
+    import laspy
+
+    from pcd_merge.gui import align_panel as ap
+
+    win = window()
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    win.modes.setCurrentIndex(2)
+    panel = win.inspect_panel
+    assert panel.b_copc.isEnabled()  # one scan: no alignment needed
+    out = str(tmp_path / "site.copc.laz")
+    seen = {}
+
+    def dialog(_parent, title, _start, _filters, chosen):
+        seen["title"], seen["chosen"] = title, chosen
+        return out, chosen
+
+    monkeypatch.setattr(ap.QFileDialog, "getSaveFileName", dialog)
+    monkeypatch.setattr(ap.QMessageBox, "information", lambda *a, **k: None)
+    panel.b_copc.click()
+    _wait(qtbot, win)
+    assert seen["title"] == "Save viewing file" and "*.copc.laz" in seen["chosen"]
+    with laspy.CopcReader.open(out) as r:
+        assert len(r.query()) == len(read_cloud(scans[0]).data)
+    assert win.doc.project.exports[-1]["path"] == out
+    # the usual merge format is not changed by it
+    assert win.doc.project.settings.get("export", {}).get("format") != ".copc.laz"
+    win.doc.dirty = False

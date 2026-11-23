@@ -199,6 +199,16 @@ saved in the project, and listed on the left under *Measurements*.
 all as a CSV spreadsheet, and saves a **screenshot** of the view, as shown or
 two or four times larger for printing.
 
+**Make viewing file…** (in Inspect) saves the site as a COPC file (`.copc.laz`,
+Cloud Optimized Point Cloud): every point, with deleted points and the Edit
+clean-up left out as in a merge, stored in the cubes of an octree with an
+index. Viewers read only the cubes in view, at the detail they need, so even a
+building-sized site opens at once in CloudCompare, QGIS, Potree or
+viewer.copc.io, and it stays an ordinary LAZ file for any other LAS software.
+COPC is also offered in the save dialog of every merge. The file is written
+in two passes through a temporary file next to it, so allow about twice its
+uncompressed size (36 bytes a point) of free disk space while it is made.
+
 ### Walk-through (first person)
 
 Press **Walk through** above the 3D view to walk or fly around inside the scan,
@@ -250,6 +260,7 @@ gives back its exact intensities (from `intensity_raw`).
 | `.ply` | CloudCompare, MeshLab, Blender | every field (`rgb` becomes red/green/blue, normals become nx/ny/nz) |
 | `.las` / `.laz` | survey and GIS software, CloudCompare | intensity, colour, GPS time (from `timestamp`/`time`/`t`), `source` as point source ID; every other field as a LAS extra field |
 | `.e57` | Recap, Cyclone, Scene, CloudCompare | coordinates (double precision), intensity, colour, time stamp; other fields are left out |
+| `.copc.laz` | CloudCompare, QGIS, PDAL, Potree, [viewer.copc.io](https://viewer.copc.io); any LAS software as plain LAZ | as `.laz`, with the points arranged in an octree so viewers load only what is on screen |
 
 LAS stores intensity as whole numbers 0-65535. Integer intensities are stored
 as they are; fractional ones (e.g. 0-1 floats) are rescaled to the full 16-bit
@@ -361,7 +372,8 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned (see `docs/plan-1.0.md`): a full-quality COPC viewing file for Inspect (0.11).
+* Planned (see `docs/plan-1.0.md`): drawing the COPC viewing file in the app itself, streamed
+  at full quality.
 
 ## Large scans
 

@@ -7,7 +7,9 @@ split into parts, clean-up and colour by height in Edit (PR #21). 0.11 started:
 colour by intensity or RGB, and measuring (distance, height difference, slope,
 coordinates) from a Measure button in every mode, with the Inspect panel, CSV
 export and screenshots (PR #23); align by hand from picked point pairs, with
-automatic tightening (ICP). Still to do in 0.11: the COPC viewing file.
+automatic tightening (ICP); the COPC viewing file (our own writer on laspy + lazrs,
+see below), from Inspect or any merge. Next: drawing COPC files in the app,
+streamed, for Inspect at full quality.
 
 ## Where we are (0.8.0)
 
@@ -344,4 +346,8 @@ project may be asked to wait.
 Writing COPC: laspy reads COPC but does not write it. The options are our own
 octree writer on top of laspy/lazrs (the format is documented and the
 walk-through already builds a similar grid), or bundling PDAL/untwine (large
-on Windows). A short spike at the start of 0.11 should decide.
+on Windows). Decided (0.11): our own writer, `pcd_merge/copc.py`. Points get
+a random level of detail sized so each cube holds about 100,000, are spooled
+to disk as LAS records with an octree key, sorted, and compressed one cube per
+LAZ chunk (variable-size chunks); laspy's CopcReader reads the result back in
+the tests and the Windows self-test.
