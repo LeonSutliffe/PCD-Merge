@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Sequence, Union
 
 import numpy as np
 import open3d as o3d
@@ -25,6 +25,12 @@ import open3d as o3d
 reg = o3d.pipelines.registration
 
 ProgressFn = Callable[[str, float], None]
+# A cloud's coordinates, or a function returning them. With functions, only
+# one full-resolution cloud is held in memory at a time.
+CloudSource = Union[np.ndarray, Callable[[], np.ndarray]]
+
+# The automatic voxel size is estimated on at most this many points per cloud.
+_VOXEL_ESTIMATE_POINTS = 2_000_000
 
 
 @dataclass
@@ -34,6 +40,8 @@ class AlignSettings:
     ransac_iterations: int = 200_000
     ransac_confidence: float = 0.999
     ransac_attempts: int = 5  # independent RANSAC runs, best after ICP is kept
+    # Stop early once this many RANSAC runs have all led to the same answer.
+    ransac_agree: int = 3
     min_fitness: float = 0.15  # pairs below this are not trusted as graph edges
     seed: int | None = None
 
@@ -57,6 +65,9 @@ class AlignResult:
     connected: list[bool]
     # per-cloud final fitness against all the other aligned clouds
     cloud_fitness: list[float]
+    # each cloud downsampled at voxel_size * 0.5, in its own frame; lets the
+    # quality report skip another pass over the full-resolution points
+    fine: list = field(default=None, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -85,11 +96,63 @@ def to_o3d(xyz: np.ndarray) -> o3d.geometry.PointCloud:
     return pc
 
 
+_DOWN_CHUNK = 2_000_000
+
+
+def voxel_down(xyz: np.ndarray, voxel: float, chunk: int = _DOWN_CHUNK) -> o3d.geometry.PointCloud:
+    """Voxel-downsample a cloud of any size in chunks of ``chunk`` points.
+
+    Open3D holds Python's global lock while it works, so one call on a
+    50-million-point cloud would freeze the app's window for several seconds.
+    Chunks keep each pause short and avoid a full-size Open3D copy.
+
+    Every chunk gets a sentinel point at the same far corner, which pins all
+    chunks to one voxel grid; the sentinel sits alone in its voxel and is
+    removed. Voxels split across chunks are joined by a final pass, so the
+    output has exactly one point per occupied voxel, like Open3D's own.
+    """
+    n = len(xyz)
+    if n <= chunk:
+        return to_o3d(xyz).voxel_down_sample(voxel)
+    lo = xyz.min(axis=0)
+    buf = np.empty((chunk + 1, 3), dtype=np.float64)
+    buf[0] = lo - 2 * voxel
+
+    def down(m: int) -> np.ndarray:
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(buf[: m + 1]))
+        out = np.asarray(pc.voxel_down_sample(voxel).points)
+        return out[(out >= lo - voxel).all(axis=1)]  # drop the sentinel
+
+    parts = []
+    for start in range(0, n, chunk):
+        part = xyz[start : start + chunk]
+        buf[1 : len(part) + 1] = part
+        parts.append(down(len(part)))
+    joined = np.concatenate(parts)
+    if len(joined) + 1 > len(buf):
+        buf = np.empty((len(joined) + 1, 3), dtype=np.float64)
+        buf[0] = lo - 2 * voxel
+    buf[1 : len(joined) + 1] = joined
+    return to_o3d(down(len(joined)))
+
+
+def _estimate_sample(xyz: np.ndarray) -> np.ndarray:
+    """Random subset used to choose the voxel size quickly on huge clouds."""
+    if len(xyz) <= _VOXEL_ESTIMATE_POINTS:
+        return xyz
+    idx = np.random.default_rng(0).integers(0, len(xyz), _VOXEL_ESTIMATE_POINTS)
+    return xyz[np.sort(idx)]
+
+
 def auto_voxel_size(clouds_xyz: list[np.ndarray], target_points: int = 40_000) -> float:
-    """Pick a voxel size giving roughly ``target_points`` per downsampled cloud."""
+    """Pick a voxel size giving roughly ``target_points`` per downsampled cloud.
+
+    Very large clouds are estimated from a random subset of their points,
+    which is many times faster and gives practically the same voxel size.
+    """
     sizes = []
     for xyz in clouds_xyz:
-        pc = to_o3d(xyz)
+        pc = to_o3d(_estimate_sample(xyz))
         ext = pc.get_axis_aligned_bounding_box().get_extent()
         diag = float(np.linalg.norm(ext))
         if diag <= 0:
@@ -118,13 +181,14 @@ class _Prepared:
 
 
 def _prepare(xyz: np.ndarray, voxel: float) -> _Prepared:
-    pc = to_o3d(xyz)
-    down = pc.voxel_down_sample(voxel)
+    # One pass over the full-resolution points; the coarser grid is built
+    # from the (much smaller) fine one.
+    fine = voxel_down(xyz, voxel * 0.5)
+    down = fine.voxel_down_sample(voxel)
     down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 2.5, max_nn=30))
     fpfh = reg.compute_fpfh_feature(
         down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 5.0, max_nn=100)
     )
-    fine = pc.voxel_down_sample(voxel * 0.5)
     fine.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 1.5, max_nn=30))
 
     keep = np.arange(len(down.points))
@@ -144,28 +208,25 @@ def _prepare(xyz: np.ndarray, voxel: float) -> _Prepared:
     return _Prepared(down, fine, struct, struct_fpfh)
 
 
-def _global_candidates(src: _Prepared, tgt: _Prepared, voxel: float, s: AlignSettings):
-    """Several independent RANSAC runs; each result is a candidate start for ICP."""
+def _ransac(src: _Prepared, tgt: _Prepared, voxel: float, s: AlignSettings) -> np.ndarray:
+    """One RANSAC run on feature matches; the result is a candidate start for ICP."""
     dist = voxel * 1.5
-    out = []
-    for _ in range(max(1, s.ransac_attempts)):
-        r = reg.registration_ransac_based_on_feature_matching(
-            src.struct,
-            tgt.struct,
-            src.struct_fpfh,
-            tgt.struct_fpfh,
-            True,  # mutual filter
-            dist,
-            reg.TransformationEstimationPointToPoint(False),
-            3,
-            [
-                reg.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-                reg.CorrespondenceCheckerBasedOnDistance(dist),
-            ],
-            reg.RANSACConvergenceCriteria(s.ransac_iterations, s.ransac_confidence),
-        )
-        out.append(r.transformation)
-    return out
+    r = reg.registration_ransac_based_on_feature_matching(
+        src.struct,
+        tgt.struct,
+        src.struct_fpfh,
+        tgt.struct_fpfh,
+        True,  # mutual filter
+        dist,
+        reg.TransformationEstimationPointToPoint(False),
+        3,
+        [
+            reg.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+            reg.CorrespondenceCheckerBasedOnDistance(dist),
+        ],
+        reg.RANSACConvergenceCriteria(s.ransac_iterations, s.ransac_confidence),
+    )
+    return r.transformation
 
 
 def _refine(src: _Prepared, tgt: _Prepared, init: np.ndarray, voxel: float) -> np.ndarray:
@@ -188,16 +249,23 @@ def _score(src: _Prepared, tgt: _Prepared, t: np.ndarray, voxel: float) -> float
 
 
 def register_pair(src: _Prepared, tgt: _Prepared, voxel: float, s: AlignSettings,
-                  i: int, j: int) -> PairResult:
+                  i: int, j: int, step: Callable[[float], None] | None = None) -> PairResult:
     # RANSAC can lock onto a wrong but plausible solution (e.g. rotated on a
     # ground plane). Refine every candidate and keep the one whose structure
     # (walls, poles, objects) agrees best after ICP.
     best_t, best_score = None, -1.0
     seen: list[np.ndarray] = []
-    for init in _global_candidates(src, tgt, voxel, s):
-        t = _refine(src, tgt, init, voxel)
+    attempts = max(1, s.ransac_attempts)
+    for k in range(attempts):
+        t = _refine(src, tgt, _ransac(src, tgt, voxel, s), voxel)
+        if step:
+            step((k + 1) / attempts)
         if any(np.allclose(t, u, atol=voxel * 0.2) for u in seen):
-            continue  # same solution as an earlier candidate
+            # Same solution as an earlier candidate. If every run so far has
+            # ended at one answer, further runs will not change the result.
+            if len(seen) == 1 and s.ransac_agree and k + 1 >= s.ransac_agree:
+                break
+            continue
         seen.append(t)
         score = _score(src, tgt, t, voxel)
         if score > best_score:
@@ -210,11 +278,17 @@ def register_pair(src: _Prepared, tgt: _Prepared, voxel: float, s: AlignSettings
     return PairResult(i, j, t, max(ev.fitness, rev.fitness), ev.inlier_rmse, info)
 
 
-def align(clouds_xyz: list[np.ndarray], settings: AlignSettings | None = None,
+def _get(src: CloudSource) -> np.ndarray:
+    return src() if callable(src) else src
+
+
+def align(clouds_xyz: Sequence[CloudSource], settings: AlignSettings | None = None,
           progress: ProgressFn = _noop) -> AlignResult:
     """Align clouds into the frame of the first cloud.
 
-    ``clouds_xyz`` are (N, 3) arrays. Returns one 4x4 transform per cloud.
+    ``clouds_xyz`` are (N, 3) arrays, or functions returning them (so that
+    huge clouds can be converted one at a time). Returns one 4x4 transform
+    per cloud.
     """
     s = settings or AlignSettings()
     n = len(clouds_xyz)
@@ -223,20 +297,32 @@ def align(clouds_xyz: list[np.ndarray], settings: AlignSettings | None = None,
     if s.seed is not None:
         o3d.utility.random.seed(int(s.seed))
 
-    progress("Choosing voxel size", 0.0)
-    voxel = s.voxel_size or auto_voxel_size(clouds_xyz, s.target_points)
+    voxel = s.voxel_size
+    if not voxel:
+        samples = []
+        for k, src in enumerate(clouds_xyz):
+            progress(f"Choosing voxel size ({k + 1}/{n})", 0.06 * k / n)
+            samples.append(_estimate_sample(_get(src)))
+        progress("Choosing voxel size", 0.06)
+        voxel = auto_voxel_size(samples, s.target_points)
+        del samples
 
     prepared = []
-    for k, xyz in enumerate(clouds_xyz):
-        progress(f"Downsampling and computing features for cloud {k + 1}/{n}", 0.05 + 0.25 * k / n)
-        prepared.append(_prepare(xyz, voxel))
+    for k, src in enumerate(clouds_xyz):
+        progress(f"Downsampling and computing features for cloud {k + 1}/{n}",
+                 0.08 + 0.22 * k / n)
+        prepared.append(_prepare(_get(src), voxel))
 
     pairs: list[PairResult] = []
     combos = list(itertools.combinations(range(n), 2))
+    span = 0.6 / len(combos)
     for k, (i, j) in enumerate(combos):
-        progress(f"Registering cloud {i + 1} with cloud {j + 1}", 0.3 + 0.6 * k / len(combos))
+        msg = f"Registering cloud {i + 1} with cloud {j + 1}"
+        base = 0.3 + span * k
+        progress(msg, base)
         # source i -> target j
-        pairs.append(register_pair(prepared[i], prepared[j], voxel, s, i, j))
+        pairs.append(register_pair(prepared[i], prepared[j], voxel, s, i, j,
+                                   step=lambda f, m=msg, b=base: progress(m, b + span * f)))
 
     progress("Optimising poses", 0.92)
     if n == 2:
@@ -249,7 +335,8 @@ def align(clouds_xyz: list[np.ndarray], settings: AlignSettings | None = None,
 
     cloud_fitness = _cloud_fitness(prepared, transforms, voxel)
     progress("Done", 1.0)
-    return AlignResult(transforms, pairs, voxel, connected, cloud_fitness)
+    return AlignResult(transforms, pairs, voxel, connected, cloud_fitness,
+                       fine=[p.fine for p in prepared])
 
 
 def _pose_graph(n, pairs, prepared, voxel, s):

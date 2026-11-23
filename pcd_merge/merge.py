@@ -82,7 +82,11 @@ def merge_clouds(clouds: list[PointCloud], transforms: list[np.ndarray],
     partially-present fields so the caller can warn about them.
 
     ``add_source_field`` adds a ``source`` field (U2) holding the index of the
-    file each point came from.
+    file each point came from. ``progress(message, fraction)`` is called as
+    the work goes on.
+
+    Without clean-up, points are transformed in chunks straight into the
+    output array, so the only full-size allocation is the merged result.
 
     ``cleanup`` is an optional :class:`~pcd_merge.cleanup.CleanupOptions`
     (de-duplication, noise and moving-object removal); use
@@ -99,6 +103,11 @@ def merge_clouds_with_stats(clouds, transforms, add_source_field=False, cleanup=
     (``None`` when no clean-up was asked for)."""
     if len(clouds) != len(transforms):
         raise ValueError("one transform per cloud is required")
+    if cleanup is None or not cleanup.any:
+        out, missing = _stream_merge(clouds, transforms, add_source_field, progress)
+        return out, missing, None
+    if progress:
+        progress("Applying transforms to full-resolution clouds", 0.0)
     parts = [transform_cloud(c, t) for c, t in zip(clouds, transforms)]
     stats = None
     if cleanup is not None and cleanup.any:
@@ -131,3 +140,63 @@ def _concat(parts: list[np.ndarray], add_source_field: bool) -> tuple[np.ndarray
             out["source"][sl] = k
         pos += len(p)
     return out, missing
+
+
+def _stream_merge(clouds, transforms, add_source_field, progress):
+    """Transform and join clouds chunk by chunk straight into the output."""
+    dtype, missing = _merged_dtype([c.data.dtype for c in clouds])
+    if add_source_field:
+        if "source" in dtype.names:
+            raise ValueError("clouds already have a 'source' field")
+        dtype = np.dtype(dtype.descr + [("source", "<u2")])
+
+    masks = [c.finite_mask() for c in clouds]
+    counts = [int(m.sum()) for m in masks]
+    total = sum(counts)
+    msg = f"Applying transforms to {total:,} full-resolution points"
+    out = np.zeros(total, dtype=dtype)
+    pos = 0
+    for k, (c, t, m) in enumerate(zip(clouds, transforms, masks)):
+        data = c.data
+        all_ok = counts[k] == len(data)
+        for start in range(0, len(data), _CHUNK):
+            src = data[start : start + _CHUNK]
+            if not all_ok:
+                src = src[m[start : start + _CHUNK]]
+            sl = slice(pos, pos + len(src))
+            _copy_transformed(src, out, sl, t, dtype)
+            if add_source_field:
+                out["source"][sl] = k
+            pos += len(src)
+            if progress:
+                progress(msg, pos / max(1, total))
+    return out, missing
+
+
+_CHUNK = 2_000_000  # points transformed at a time (bounds float64 scratch memory)
+
+
+def _copy_transformed(src: np.ndarray, out: np.ndarray, sl: slice, t: np.ndarray,
+                      dtype: np.dtype) -> None:
+    """Write ``src`` (one chunk of one cloud) into ``out[sl]`` with ``t`` applied."""
+    t = np.asarray(t, dtype=np.float64)
+    r, tr = t[:3, :3], t[:3, 3]
+    names = src.dtype.names
+    xyz = np.empty((len(src), 3), dtype=np.float64)
+    xyz[:, 0], xyz[:, 1], xyz[:, 2] = src["x"], src["y"], src["z"]
+    xyz = xyz @ r.T + tr
+    moved = {"x": xyz[:, 0], "y": xyz[:, 1], "z": xyz[:, 2]}
+    for trio in _NORMAL_SETS:
+        if all(n in names for n in trio):
+            nrm = np.stack([src[n] for n in trio], axis=1).astype(np.float64) @ r.T
+            for j, n in enumerate(trio):
+                moved[n] = nrm[:, j]
+    for name in names:
+        dst = out[name]
+        if name in moved:
+            # cast back to the file's own type first, as transform_cloud does
+            dst[sl] = moved[name].astype(src.dtype[name], copy=False)
+        elif name in ("rgb", "rgba") and src.dtype[name] != dtype[name]:
+            dst[sl] = src[name].view(dtype[name])
+        else:
+            dst[sl] = src[name]
