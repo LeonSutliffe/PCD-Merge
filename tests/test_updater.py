@@ -1,4 +1,5 @@
 import os
+import shutil
 import zipfile
 
 import pytest
@@ -177,3 +178,67 @@ def test_release_digest_is_read():
         "name": "PCD-Merge-1.0.0-windows-x64.zip", "browser_download_url": "u", "size": 5,
         "digest": "sha256:" + "ab" * 32}]})
     assert rel.sha256 == "ab" * 32
+
+
+# --------------------------------------------------------------------------
+# Leftover staging folders (Windows "Access is denied")
+
+
+def test_remove_tree_retries_files_it_cannot_delete_at_first(tmp_path, monkeypatch):
+    d = tmp_path / "app-new" / "_internal" / "licenses"
+    d.mkdir(parents=True)
+    (d / "LICENSE").write_text("x")
+    real_unlink = os.unlink
+    failed = []
+
+    def flaky_unlink(p, *a, **k):
+        if not failed:  # first attempt: like a read-only file on Windows
+            failed.append(p)
+            raise PermissionError(5, "Access is denied", p)
+        return real_unlink(p, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", flaky_unlink)
+    assert updater._remove_tree(str(tmp_path / "app-new"))
+    assert failed and not (tmp_path / "app-new").exists()
+
+
+def test_remove_tree_never_raises(tmp_path, monkeypatch):
+    (tmp_path / "stuck").mkdir()
+    (tmp_path / "stuck" / "f").write_text("x")
+    monkeypatch.setattr(updater.time, "sleep", lambda s: None)
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: (_ for _ in ()).throw(
+        PermissionError(5, "Access is denied")))
+    assert updater._remove_tree(str(tmp_path / "stuck")) is False
+
+
+def test_update_stages_into_fresh_folder_despite_stuck_leftover(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    root = updater.install_root()
+    stuck = os.path.join(root, "app-new", "_internal", "attrs.dist-info", "licenses")
+    os.makedirs(stuck)
+    real = updater._remove_tree
+    monkeypatch.setattr(updater, "_remove_tree",
+                        lambda p, attempts=3: False if os.path.basename(p) == "app-new"
+                        else real(p, attempts))
+    data = _payload(tmp_path)
+    srv, url, _ = _serve(data)
+    try:
+        rel = updater.Release("9.9.9", url, len(data), "", "",
+                              hashlib.sha256(data).hexdigest())
+        staged = updater.stage_update(rel)
+    finally:
+        srv.shutdown()
+    assert os.path.basename(staged).startswith("app-new-")
+    assert os.path.isfile(os.path.join(staged, updater.EXE_NAME))
+    assert os.path.isdir(stuck)  # the leftover is simply left alone
+    script = open(updater.write_swap_script(1, [], staged)).read()
+    assert staged in script and "app-old-" in script
+
+
+def test_clean_leftovers_only_touches_staging_folders(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    root = updater.install_root()
+    for n in ("app", "app-new", "app-new-1a2b", "app-new-1a2b.unzip", "app-old-ff", "notes"):
+        os.makedirs(os.path.join(root, n))
+    updater.clean_leftovers()
+    assert sorted(os.listdir(root)) == ["app", "notes"]

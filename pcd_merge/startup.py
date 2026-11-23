@@ -70,12 +70,12 @@ def _first_run_install(app: QApplication) -> bool:
     if ans != QMessageBox.Yes:
         return False
     try:
-        _in_background(app, "Installing PCD Merge…", updater.stage_self)
+        staged = _in_background(app, "Installing PCD Merge…", updater.stage_self)
         if not updater.create_shortcuts():
             QMessageBox.warning(None, "PCD Merge",
                                 "PCD Merge was installed, but the Desktop shortcut could not be "
                                 f"created. You can start it from:\n{updater.app_dir()}")
-        updater.launch_swap(sys.argv[1:])
+        updater.launch_swap(sys.argv[1:], staged)
         return True
     except Exception as e:
         QMessageBox.warning(None, "PCD Merge", f"Installing failed:\n{e}\n\n"
@@ -113,9 +113,9 @@ def _check_and_update(app: QApplication) -> bool:
     if clicked is not b_now:
         return False
     try:
-        _in_background(app, f"Downloading PCD Merge {rel.version}…", updater.stage_update, rel,
-                       determinate=True)
-        updater.launch_swap(sys.argv[1:])
+        staged = _in_background(app, f"Downloading PCD Merge {rel.version}…",
+                                updater.stage_update, rel, determinate=True)
+        updater.launch_swap(sys.argv[1:], staged)
         return True
     except Exception as e:
         _update_failed(rel, e)

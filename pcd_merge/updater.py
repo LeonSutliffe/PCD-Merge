@@ -7,14 +7,14 @@ Layout on disk::
 
     %LOCALAPPDATA%\\PCD Merge\\
         app\\                 the bundled program (PCD Merge.exe + libraries)
-        app-new\\             a new version being staged (temporary)
-        swap.cmd              helper that swaps app-new into place (temporary)
+        app-new-…\\           a new version being staged (temporary, unique name)
+        swap.cmd              helper that swaps the staged copy into place (temporary)
 
 * First run from anywhere else (e.g. the unzipped download): the program is
   copied into ``app``, Desktop and Start Menu shortcuts pointing at
   ``app\\PCD Merge.exe`` are created, and the installed copy is started.
 * Every start from the shortcut: the latest GitHub release is checked. If it
-  is newer, the user is asked; on yes the zip is downloaded into ``app-new``
+  is newer, the user is asked; on yes the zip is downloaded into a fresh ``app-new-…`` folder
   and a small script waits for the program to exit, swaps the folders and
   starts the new version. The shortcut never changes.
 """
@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -212,16 +213,79 @@ def download(url: str, dest: str, progress: ProgressFn | None = None,
         raise DownloadError("the downloaded file is not a valid zip")
 
 
+def _remove_tree(path: str, attempts: int = 3) -> bool:
+    """Delete a folder, coping with Windows' habits. Returns True if it's gone.
+
+    Read-only files are made writable and retried, and a folder another
+    program briefly holds open (antivirus, Explorer, the search indexer) gets
+    a few more tries. Never raises: a folder that still can't be deleted is
+    simply left for a later clean-up.
+    """
+    def fix(func, p, *_):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    for attempt in range(attempts):
+        if not os.path.exists(path):
+            return True
+        try:
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(path, onexc=fix)
+            else:  # pragma: no cover
+                shutil.rmtree(path, onerror=fix)
+        except OSError:
+            pass
+        if not os.path.exists(path):
+            return True
+        time.sleep(0.5 * (attempt + 1))
+    return not os.path.exists(path)
+
+
+_LEFTOVER = re.compile(r"^app-(new|old)(-[0-9a-z]+)?(\.unzip)?$")
+
+
+def clean_leftovers() -> None:
+    """Best-effort removal of staging folders left by interrupted updates."""
+    root = install_root()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        if _LEFTOVER.match(name):
+            _remove_tree(os.path.join(root, name), attempts=1)
+
+
+def _fresh_dir(prefix: str) -> str:
+    """A new, unused folder name in the install root.
+
+    Staging always goes into a brand-new folder, so a leftover from an earlier
+    failed update that Windows won't let us delete can never block this one.
+    """
+    os.makedirs(install_root(), exist_ok=True)
+    stamp = f"{int(time.time()):x}{os.getpid():x}"
+    path = os.path.join(install_root(), f"{prefix}-{stamp}")
+    k = 0
+    while os.path.exists(path):
+        k += 1
+        path = os.path.join(install_root(), f"{prefix}-{stamp}{k}")
+    return path
+
+
 def extract_app(zip_path: str, dest: str) -> None:
     """Unzip a release into ``dest`` so that ``dest/PCD Merge.exe`` exists.
 
     The zip may hold the files directly or inside one top-level folder.
+    ``dest`` should not exist yet (see :func:`_fresh_dir`); if it does, it is
+    removed first.
     """
-    if os.path.exists(dest):
-        shutil.rmtree(dest)
+    if os.path.exists(dest) and not _remove_tree(dest):
+        raise RuntimeError(f"could not clear the old folder {dest}")
     tmp = dest + ".unzip"
-    if os.path.exists(tmp):
-        shutil.rmtree(tmp)
+    _remove_tree(tmp)
     with zipfile.ZipFile(zip_path) as z:
         z.extractall(tmp)
     root = tmp
@@ -229,22 +293,32 @@ def extract_app(zip_path: str, dest: str) -> None:
     if len(entries) == 1 and os.path.isdir(os.path.join(tmp, entries[0])):
         root = os.path.join(tmp, entries[0])
     if not os.path.isfile(os.path.join(root, EXE_NAME)):
-        shutil.rmtree(tmp)
+        _remove_tree(tmp)
         raise RuntimeError(f"the download does not contain {EXE_NAME}")
-    shutil.move(root, dest)
-    if os.path.exists(tmp):
-        shutil.rmtree(tmp)
+    for attempt in range(5):  # antivirus may still be scanning the new files
+        try:
+            os.rename(root, dest)
+            break
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(1 + attempt)
+    _remove_tree(tmp, attempts=1)
 
 
 def stage_update(rel: Release, progress: ProgressFn | None = None) -> str:
-    """Download and unpack ``rel`` into the staging folder. Returns its path."""
-    os.makedirs(install_root(), exist_ok=True)
-    staged = os.path.join(install_root(), "app-new")
+    """Download and unpack ``rel`` into a fresh staging folder. Returns its path."""
+    clean_leftovers()
+    staged = _fresh_dir("app-new")
     fd, zpath = tempfile.mkstemp(suffix=".zip", prefix="pcd-merge-")
     os.close(fd)
     try:
         download(rel.url, zpath, progress, expected_size=rel.size, sha256=rel.sha256)
         extract_app(zpath, staged)
+    except BaseException:
+        _remove_tree(staged, attempts=1)
+        _remove_tree(staged + ".unzip", attempts=1)
+        raise
     finally:
         try:
             os.remove(zpath)
@@ -254,11 +328,9 @@ def stage_update(rel: Release, progress: ProgressFn | None = None) -> str:
 
 
 def stage_self() -> str:
-    """Copy the running program into the staging folder (first-run install)."""
-    os.makedirs(install_root(), exist_ok=True)
-    staged = os.path.join(install_root(), "app-new")
-    if os.path.exists(staged):
-        shutil.rmtree(staged)
+    """Copy the running program into a fresh staging folder (first-run install)."""
+    clean_leftovers()
+    staged = _fresh_dir("app-new")
     shutil.copytree(running_dir(), staged)
     return staged
 
@@ -308,12 +380,18 @@ def _quote_args(args: list[str]) -> str:
     return " ".join('"' + a.replace('"', "") + '"' for a in args)
 
 
-def write_swap_script(pid: int, args: list[str] | None = None) -> str:
+def write_swap_script(pid: int, args: list[str] | None = None,
+                      new_dir: str | None = None) -> str:
+    """``new_dir`` is the staged version (default: the ``app-new`` folder).
+
+    The old version is moved to a fresh ``app-old-…`` name, so a leftover
+    ``app-old`` that can't be deleted doesn't stop the swap.
+    """
     root = install_root()
     script = SWAP_SCRIPT.format(
         app=app_dir(),
-        new=os.path.join(root, "app-new"),
-        old=os.path.join(root, "app-old"),
+        new=new_dir or os.path.join(root, "app-new"),
+        old=_fresh_dir("app-old"),
         pid=pid,
         exe=EXE_NAME,
         args=_quote_args(args or []),
@@ -324,9 +402,9 @@ def write_swap_script(pid: int, args: list[str] | None = None) -> str:
     return path
 
 
-def launch_swap(args: list[str] | None = None) -> None:
+def launch_swap(args: list[str] | None = None, new_dir: str | None = None) -> None:
     """Start the swap script detached; the caller must then exit promptly."""
-    path = write_swap_script(os.getpid(), args)
+    path = write_swap_script(os.getpid(), args, new_dir)
     flags = 0
     if sys.platform == "win32":
         # hidden console (ping needs one), own process group so it outlives us
