@@ -103,7 +103,22 @@ The window has three parts and a row of mode tabs at the top right:
 * **Middle, the 3D view:** orbit, top / front / side, an orthographic option,
   and **Walk through** (first person) inside the same view.
 * **Right, the settings of the current mode.** **Align** has everything below.
-  **Edit** and **Inspect** say what is coming; the view works in them already.
+  **Edit** cleans the scans up (see *Edit mode*). **Inspect** says what is
+  coming; the view works in it already.
+
+**Edit mode.** Choose a tool and select points in the view: **Brush** (click
+or drag; the size is in metres), **Rectangle** and **Lasso** (everything inside
+the shape, through the whole depth of the view: in a Top view that is a column
+from the ground up), and **Object** (click a chair, a person or a car to take
+all of it, but not the floor or the wall it touches). Shift adds to the
+selection, Alt + drag rotates the view. **Delete** (the Del key) hides the
+selected points; **Restore** brings deleted ones back (tick *Show deleted
+points* to see them). *Edit > Undo / Redo* (Ctrl+Z / Ctrl+Y) step through the
+edits. An edit is a shape in space saved in the project, so it applies to
+every full-resolution point inside it, not just to the points drawn: merging,
+**Save cleaned cloud…** and the walk-through all leave them out. The scan
+files are never changed. If some scans are hidden, edits apply to the visible
+ones only.
 
 **Projects.** *File > Save project as…* makes a folder `Name.pcdproj` that
 remembers the scans, the alignment, the quality report, the settings and the
@@ -309,8 +324,8 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned (see `docs/plan-1.0.md`): Edit mode with selection, delete and split
-  (0.10); Inspect mode with a full-quality COPC viewing file and measuring, and a
+* Planned (see `docs/plan-1.0.md`): splitting into parts and clean-up in Edit
+  mode (0.10); Inspect mode with a full-quality COPC viewing file and measuring, and a
   manual 3-point alignment fallback (0.11).
 
 ## Large scans
