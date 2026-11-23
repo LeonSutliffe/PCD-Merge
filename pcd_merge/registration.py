@@ -65,6 +65,9 @@ class AlignResult:
     connected: list[bool]
     # per-cloud final fitness against all the other aligned clouds
     cloud_fitness: list[float]
+    # each cloud downsampled at voxel_size * 0.5, in its own frame; lets the
+    # quality report skip another pass over the full-resolution points
+    fine: list = field(default=None, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -332,7 +335,8 @@ def align(clouds_xyz: Sequence[CloudSource], settings: AlignSettings | None = No
 
     cloud_fitness = _cloud_fitness(prepared, transforms, voxel)
     progress("Done", 1.0)
-    return AlignResult(transforms, pairs, voxel, connected, cloud_fitness)
+    return AlignResult(transforms, pairs, voxel, connected, cloud_fitness,
+                       fine=[p.fine for p in prepared])
 
 
 def _pose_graph(n, pairs, prepared, voxel, s):

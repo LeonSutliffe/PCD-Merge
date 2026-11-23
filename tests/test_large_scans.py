@@ -104,3 +104,20 @@ def test_align_accepts_functions_and_reports_progress():
     assert r.ok
     assert calls == sorted(calls) and calls[-1] == 1.0
     assert len(calls) >= 8  # several updates within the registration step
+
+
+def test_quality_from_alignment_clouds_matches_full_clouds():
+    from pcd_merge.quality import assess
+    from pcd_merge.synthetic import make_scan, make_scene
+
+    poses = [make_transform(0.3, 0.02, (-5, 0, 1.5)), make_transform(2.0, 0.03, (4, 3, 1.6))]
+    scene = make_scene(seed=0, density=60)
+    xyz = [PointCloud(make_scan(scene, p[:2, 3], 18, p, seed=i)).finite_xyz()
+           for i, p in enumerate(poses)]
+    r = align(xyz, AlignSettings(seed=1))
+    full = assess(xyz, r.transforms, r.voxel_size)
+    fast = assess(r.fine, r.transforms, r.voxel_size)
+    assert [p.grade for p in fast.pairs] == [p.grade for p in full.pairs]
+    for a, b in zip(fast.pairs, full.pairs):
+        assert a.overlap == pytest.approx(b.overlap, abs=1e-9)
+        assert a.rmse == pytest.approx(b.rmse, rel=1e-9)

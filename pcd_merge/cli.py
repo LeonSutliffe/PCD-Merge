@@ -101,6 +101,13 @@ def main(argv=None) -> int:
     for w in result.warnings():
         print("warning:", w)
 
+    from .quality import assess
+
+    quality = assess(result.fine or xyz, result.transforms, result.voxel_size)
+    print()
+    for line in quality.lines([c.name for c in clouds]):
+        print(line)
+
     if args.transforms:
         with open(args.transforms, "w") as f:
             json.dump({c.path: np.asarray(t).tolist() for c, t in zip(clouds, result.transforms)},

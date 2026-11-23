@@ -52,6 +52,14 @@ def run(log_path: str | None = None) -> int:
         if rot > 0.5 or trans > 0.05:
             raise RuntimeError("alignment is wrong")
 
+        from .quality import assess
+
+        q = assess([c.xyz for c in clouds], r.transforms, r.voxel_size,
+                   preview_xyz=[c.xyz[::10] for c in clouds])
+        log(f"quality ok: {q.grade}, rmse {q.pairs[0].rmse:.4f}")
+        if q.grade == "Poor":
+            raise RuntimeError("quality report says the correct alignment is poor")
+
         merged, _ = merge_clouds(clouds, r.transforms)
         out = os.path.join(tmp, "merged.pcd")
         write_pcd(out, merged)

@@ -10,11 +10,12 @@ import traceback
 
 import numpy as np
 from PySide6.QtCore import QElapsedTimer, QObject, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -40,6 +41,8 @@ from .cleanup import CleanupOptions
 from .exporters import FORMATS, file_filter, write_cloud
 from .merge import merge_clouds_with_stats
 from .pcd_io import PointCloud, read_pcd
+from .quality import (NO_OVERLAP, QualityReport, assess, colour_stops, error_colours,
+                      fmt_distance)
 from .registration import AlignResult, AlignSettings, align
 from .thinning import thin
 
@@ -142,9 +145,34 @@ def _load_files(paths, progress):
     return out, errors
 
 
-def _align_clouds(clouds, settings, progress):
-    # Pass bound methods so only one full-size coordinate array exists at a time.
-    return align([c.finite_xyz for c in clouds], settings, progress)
+def _align_clouds(clouds, settings, previews, progress):
+    # Bound methods: each full-size coordinate array is made only when needed,
+    # one at a time.
+    xyz = [c.finite_xyz for c in clouds]
+
+    def align_progress(msg, frac):
+        progress(msg, frac * 0.9)
+
+    result = align(xyz, settings, align_progress)
+    progress("Measuring alignment quality", 0.92)
+    # Reuse the downsampled clouds from alignment instead of the full ones.
+    quality = assess(result.fine or xyz, result.transforms, result.voxel_size,
+                     preview_xyz=previews)
+    return result, quality
+
+
+GRADE_COLOURS = {"Good": "#2e9e44", "Fair": "#d08a00", "Poor": "#d0342c"}
+
+
+def _legend_pixmap(width=160, height=12) -> QPixmap:
+    pm = QPixmap(width, height)
+    grad = QLinearGradient(0, 0, width, 0)
+    for pos, (r, g, b) in colour_stops():
+        grad.setColorAt(pos, QColor.fromRgbF(r, g, b))
+    p = QPainter(pm)
+    p.fillRect(0, 0, width, height, grad)
+    p.end()
+    return pm
 
 
 def _merge_and_save(clouds, transforms, path, add_source, compressed, spacing, cleanup,
@@ -184,6 +212,7 @@ class MainWindow(QMainWindow):
         self.previews: list[np.ndarray] = []  # subsampled xyz per cloud, as drawn
         self._samples: list[np.ndarray] = []  # random preview sample per cloud
         self.result: AlignResult | None = None
+        self.quality: QualityReport | None = None
         self._thread: QThread | None = None
         self._worker: _Worker | None = None
         self._items = []
@@ -235,10 +264,22 @@ class MainWindow(QMainWindow):
         self.b_align.clicked.connect(lambda: self._start_align(new_seed=False))
         lv.addWidget(self.b_align)
 
+        self.grade_label = QLabel()
+        self.grade_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.grade_label.setToolTip(
+            "Good: the clouds agree closely where they overlap. Fair: usable, but check the "
+            "heatmap for red areas. Poor: likely misaligned or barely overlapping.")
+        self.grade_label.hide()
+        lv.addWidget(self.grade_label)
+
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
         self.report.setPlaceholderText("Alignment results will appear here.")
-        self.report.setMaximumHeight(190)
+        self.report.setMaximumHeight(230)
+        font = self.report.font()
+        font.setFamily("Consolas")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.report.setFont(font)
         lv.addWidget(self.report)
 
         row = QHBoxLayout()
@@ -346,6 +387,15 @@ class MainWindow(QMainWindow):
         top.addWidget(QLabel("Show:"))
         top.addWidget(self.rb_orig)
         top.addWidget(self.rb_aligned)
+        top.addSpacing(16)
+        top.addWidget(QLabel("Colour:"))
+        self.colour_mode = QComboBox()
+        self.colour_mode.addItems(["Per cloud", "Alignment error"])
+        self.colour_mode.setToolTip(
+            "Alignment error colours each point by its distance to the surface of the other "
+            "clouds: blue fits, red is off. Grey points are seen by only one scan.")
+        self.colour_mode.currentIndexChanged.connect(self._redraw)
+        top.addWidget(self.colour_mode)
         top.addStretch(1)
         top.addWidget(QLabel("Point size:"))
         self.pt_size = QSlider(Qt.Horizontal)
@@ -368,9 +418,28 @@ class MainWindow(QMainWindow):
             msg = QLabel("3D preview unavailable (OpenGL could not be initialised).")
             msg.setAlignment(Qt.AlignCenter)
             rv.addWidget(msg, 1)
+        bottom = QHBoxLayout()
         hint = QLabel("Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom")
         hint.setStyleSheet("color: #888;")
-        rv.addWidget(hint)
+        bottom.addWidget(hint)
+        bottom.addStretch(1)
+        self.legend = QWidget()
+        lg = QHBoxLayout(self.legend)
+        lg.setContentsMargins(0, 0, 0, 0)
+        self.legend_lo = QLabel("0")
+        bar = QLabel()
+        bar.setPixmap(_legend_pixmap())
+        self.legend_hi = QLabel()
+        grey = QPixmap(12, 12)
+        grey.fill(QColor.fromRgbF(*NO_OVERLAP))
+        swatch = QLabel()
+        swatch.setPixmap(grey)
+        for w in (QLabel("Error:"), self.legend_lo, bar, self.legend_hi, QLabel("  "), swatch,
+                  QLabel("no overlap")):
+            lg.addWidget(w)
+        self.legend.hide()
+        bottom.addWidget(self.legend)
+        rv.addLayout(bottom)
 
         split = QSplitter()
         split.addWidget(left)
@@ -399,6 +468,7 @@ class MainWindow(QMainWindow):
         self.b_save_tf.setEnabled(not busy and self.result is not None)
         self.b_remove.setEnabled(not busy and n > 0)
         self.rb_aligned.setEnabled(self.result is not None)
+        self.colour_mode.setEnabled(self.quality is not None)
         self.drop_hint.setVisible(n == 0)
 
     def _set_status(self, msg: str, frac: float | None = None):
@@ -574,7 +644,10 @@ class MainWindow(QMainWindow):
 
     def _invalidate(self):
         self.result = None
+        self.quality = None
         self.report.clear()
+        self.grade_label.hide()
+        self.colour_mode.setCurrentIndex(0)
         self.rb_orig.setChecked(True)
 
     # ---------------------------------------------------------------- align
@@ -584,26 +657,35 @@ class MainWindow(QMainWindow):
             return
         seed = random.randrange(1 << 30) if new_seed else 0
         settings = AlignSettings(voxel_size=self.voxel.value() or None, seed=seed)
-        self._run(_align_clouds, (list(self.clouds), settings), self._aligned, "Aligning…")
+        self._run(_align_clouds, (list(self.clouds), settings, list(self.previews)),
+                  self._aligned, "Aligning…")
 
-    def _aligned(self, result: AlignResult):
-        self.result = result
-        lines = [f"Voxel size used: {result.voxel_size:.3g}", "", "Pair overlap:"]
-        for p in result.pairs:
-            lines.append(f"  {p.source + 1} ↔ {p.target + 1}: {p.fitness:.0%}"
-                         f"  (rmse {p.rmse:.3g})")
-        lines += ["", "Each cloud vs. the rest:"]
-        for i, f in enumerate(result.cloud_fitness):
-            lines.append(f"  {i + 1} {self.clouds[i].name}: {f:.0%}")
+    def _aligned(self, payload):
+        result, quality = payload
+        self.result, self.quality = result, quality
+        grade = quality.grade
+        self.grade_label.setText(f"Alignment quality: {grade}")
+        self.grade_label.setStyleSheet(
+            f"font-weight: bold; font-size: 14px; color: {GRADE_COLOURS[grade]};")
+        self.grade_label.show()
+        lines = quality.lines([c.name for c in self.clouds])[2:]  # grade is shown above
+        lines += ["", f"Voxel size used: {result.voxel_size:.3g}. Distances are to the other "
+                  "cloud's surface; points more than "
+                  f"{fmt_distance(quality.threshold)} away count as not overlapping."]
         warns = result.warnings()
         if warns:
             lines += ["", "Warnings:"] + ["  " + w for w in warns]
+        if warns or grade != "Good":
             lines += ["", "Try Retry, or a larger voxel size."]
         self.report.setPlainText("\n".join(lines))
+        self.legend_hi.setText(f"≥ {fmt_distance(quality.scale_max)}")
         self.rb_aligned.setChecked(True)
+        if grade != "Good":
+            self.colour_mode.setCurrentIndex(1)  # show where the clouds disagree
+        self._update_buttons()
         self._redraw()
-        if warns:
-            self._set_status("Aligned with warnings. Check the preview before merging.")
+        if warns or grade != "Good":
+            self._set_status(f"Aligned, quality {grade}. Check the error heatmap before merging.")
         else:
             self._set_status("Aligned. Check the preview, then Accept and merge (or Retry).")
 
@@ -617,6 +699,13 @@ class MainWindow(QMainWindow):
                 self, "PCD Merge",
                 "Some clouds could not be aligned and would be merged in their original "
                 "position. Merge anyway?")
+            if ans != QMessageBox.Yes:
+                return
+        elif self.quality is not None and self.quality.grade == "Poor":
+            ans = QMessageBox.question(
+                self, "PCD Merge",
+                "The alignment quality is Poor: the clouds disagree or barely overlap. "
+                "Merge anyway?")
             if ans != QMessageBox.Yes:
                 return
         base = os.path.dirname(self.clouds[0].path or "")
@@ -679,6 +768,9 @@ class MainWindow(QMainWindow):
             "transforms": {c.path: np.asarray(t).tolist()
                            for c, t in zip(self.clouds, self.result.transforms)},
         }
+        if self.quality is not None:
+            data["quality"] = self.quality.to_dict()
+            data["quality"]["files"] = [c.path for c in self.clouds]
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
         self._set_status(f"Transforms saved to {os.path.basename(path)}.")
@@ -692,6 +784,9 @@ class MainWindow(QMainWindow):
             self.view.removeItem(it)
         self._items = []
         aligned = self.rb_aligned.isChecked() and self.result is not None
+        heat = (aligned and self.quality is not None and self.colour_mode.currentIndex() == 1
+                and len(self.quality.point_error) == len(self.previews))
+        self.legend.setVisible(heat)
         size = float(self.pt_size.value())
         for i, xyz in enumerate(self.previews):
             item = self.file_list.item(i)
@@ -702,8 +797,11 @@ class MainWindow(QMainWindow):
                 t = self.result.transforms[i]
                 pts = xyz @ t[:3, :3].T + t[:3, 3]
             pts = (pts - self._origin).astype(np.float32)
-            r, g, b = PALETTE[i % len(PALETTE)]
-            sc = gl.GLScatterPlotItem(pos=pts, color=(r, g, b, 1.0), size=size, pxMode=True)
+            if heat:
+                color = error_colours(self.quality.point_error[i], self.quality.scale_max)
+            else:
+                color = (*PALETTE[i % len(PALETTE)], 1.0)
+            sc = gl.GLScatterPlotItem(pos=pts, color=color, size=size, pxMode=True)
             sc.setGLOptions("opaque")
             self.view.addItem(sc)
             self._items.append(sc)
