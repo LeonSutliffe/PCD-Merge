@@ -1,6 +1,8 @@
 """Command-line interface: ``pcd-merge a.pcd b.pcd [...] -o merged.pcd``.
 
-Folders can be given instead of files (every .pcd inside, in natural order).
+Scans can be PCD, PLY, LAS, LAZ or E57 (every scan inside a multi-scan E57
+file is aligned on its own). Folders can be given instead of files (every scan
+inside, in natural order).
 ``--add-to merged.pcd new.pcd ...`` aligns new scans to an existing merged
 cloud and appends them to it.
 
@@ -17,16 +19,23 @@ import sys
 import numpy as np
 
 
+def _cloud_key(c) -> str:
+    """Path of a cloud's file, with ``#n`` for scan n of a multi-scan E57."""
+    return f"{c.path}#{c.extra['scan_index']}" if "scan_index" in c.extra else c.path
+
+
 def _parse(argv):
     p = argparse.ArgumentParser(
         prog="pcd-merge",
-        description="Automatically align two or more PCD point clouds and merge them. "
+        description="Automatically align two or more point clouds (PCD, PLY, LAS, LAZ, E57) "
+        "and merge them. "
         "Run without arguments to open the desktop app.",
     )
     p.add_argument("files", nargs="*",
-                   help="PCD files or folders of them; the first one is the reference frame")
+                   help="scan files (.pcd .ply .las .laz .e57) or folders of them; the first one "
+                        "is the reference frame")
     p.add_argument("--add-to", metavar="MERGED",
-                   help="existing merged .pcd to add the new scans to; it stays fixed and "
+                   help="existing merged cloud to add the new scans to; it stays fixed and "
                         "the scans are aligned to it")
     p.add_argument("-o", "--output",
                    help="merged cloud to write; the extension picks the format: "
@@ -74,11 +83,11 @@ def main(argv=None) -> int:
 
     from .cleanup import CleanupOptions
     from .exporters import format_of
-    from .files import already_merged, find_pcd_files, read_manifest, save_merged
-    from .pcd_io import read_pcd
+    from .files import already_merged, read_manifest, save_merged
+    from .readers import ScanReadError, find_scan_files, read_cloud, read_clouds
     from .registration import AlignSettings, align
 
-    files = find_pcd_files(args.files)
+    files = find_scan_files(args.files)
     base = args.add_to
     if base:
         files = [f for f in files if os.path.abspath(f) != os.path.abspath(base)]
@@ -91,8 +100,9 @@ def main(argv=None) -> int:
             return 2
         files = [base] + files
     elif len(files) < 2:
-        print("error: give at least two PCD files (or a folder containing them)", file=sys.stderr)
-        return 2
+        if not (len(files) == 1 and files[0].lower().endswith(".e57")):
+            print("error: give at least two scans (or a folder containing them)", file=sys.stderr)
+            return 2
     if args.output:
         try:
             format_of(args.output)
@@ -104,10 +114,18 @@ def main(argv=None) -> int:
         return 2
 
     clouds = []
-    for path in files:
-        c = read_pcd(path)
-        print(f"Loaded {c.name}: {len(c):,} points, fields: {', '.join(c.field_names)}")
-        clouds.append(c)
+    try:
+        for k, path in enumerate(files):
+            # the base merged cloud is one cloud even if it is a multi-scan E57
+            for c in ([read_cloud(path)] if base and k == 0 else read_clouds(path)):
+                print(f"Loaded {c.name}: {len(c):,} points, fields: {', '.join(c.field_names)}")
+                clouds.append(c)
+    except (ScanReadError, OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if len(clouds) < 2:
+        print("error: give at least two scans (or a folder containing them)", file=sys.stderr)
+        return 2
 
     def progress(msg, frac):
         print(f"[{frac:4.0%}] {msg}")
@@ -135,7 +153,8 @@ def main(argv=None) -> int:
 
     if args.transforms:
         with open(args.transforms, "w") as f:
-            json.dump({c.path: np.asarray(t).tolist() for c, t in zip(clouds, result.transforms)},
+            json.dump({_cloud_key(c): np.asarray(t).tolist()
+                       for c, t in zip(clouds, result.transforms)},
                       f, indent=2)
         print(f"Wrote transforms to {args.transforms}")
 

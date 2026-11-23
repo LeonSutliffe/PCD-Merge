@@ -38,11 +38,13 @@ from PySide6.QtWidgets import (
 
 from . import __version__, retry
 from .cleanup import CleanupOptions, clean_masks
+from .cli import _cloud_key
 from .exporters import FORMATS, file_filter
 from .merge import sensor_origin
-from .files import already_merged, find_pcd_files, read_manifest, save_merged
+from .files import already_merged, read_manifest, save_merged
 from .flyscene import build_scene
-from .pcd_io import PointCloud, read_pcd
+from .pcd_io import PointCloud
+from .readers import find_scan_files, input_filter, read_cloud, read_clouds
 from .quality import (CHANGED, NO_OVERLAP, QualityReport, assess, colour_stops, error_colours,
                       fmt_distance)
 from .registration import AlignResult, AlignSettings, align
@@ -120,7 +122,7 @@ def _preview_sample(cloud: PointCloud, n: int = PREVIEW_POINTS) -> np.ndarray:
     return xyz[rng.permutation(len(xyz))]
 
 
-def _load_files(paths, progress):
+def _load_files(paths, base_only=False, *, progress):
     out, errors = [], []
     sizes = []
     for p in paths:
@@ -136,9 +138,10 @@ def _load_files(paths, progress):
         span = size / total
         progress(msg, base)
         try:
-            c = read_pcd(p, progress=lambda f, m=msg, b=base, s=span: progress(m, b + s * f * 0.95))
+            report = lambda f, m=msg, b=base, s=span: progress(m, b + s * f * 0.95)  # noqa: E731
+            clouds = read_clouds(p, progress=report) if not base_only else [read_cloud(p, progress=report)]
             progress(f"Preparing preview of {name}", base + span * 0.95)
-            out.append((c, _preview_sample(c)))
+            out += [(c, _preview_sample(c)) for c in clouds]
         except Cancelled:
             raise
         except Exception as e:
@@ -262,8 +265,8 @@ class MainWindow(QMainWindow):
         left = QWidget()
         lv = QVBoxLayout(left)
 
-        self.drop_hint = QLabel("Drag and drop two or more .pcd files, or a whole folder,\n"
-                                "here (or use Add files…)")
+        self.drop_hint = QLabel("Drag and drop two or more scans (PCD, PLY, LAS, LAZ, E57),\n"
+                                "or a whole folder, here (or use Add files…)")
         self.drop_hint.setAlignment(Qt.AlignCenter)
         self.drop_hint.setStyleSheet(
             "QLabel { border: 2px dashed #888; border-radius: 8px; padding: 18px; color: #666; }"
@@ -278,7 +281,7 @@ class MainWindow(QMainWindow):
         b_add = QPushButton("Add files…")
         b_add.clicked.connect(self._add_dialog)
         b_folder = QPushButton("Add folder…")
-        b_folder.setToolTip("Add every .pcd file in a folder and its subfolders.")
+        b_folder.setToolTip("Add every scan (PCD, PLY, LAS, LAZ, E57) in a folder and its subfolders.")
         b_folder.clicked.connect(self._add_folder_dialog)
         self.b_remove = QPushButton("Remove")
         self.b_remove.clicked.connect(self._remove_selected)
@@ -652,30 +655,28 @@ class MainWindow(QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        paths = find_pcd_files([url.toLocalFile() for url in e.mimeData().urls()])
+        paths = find_scan_files([url.toLocalFile() for url in e.mimeData().urls()])
         if paths:
             self.add_files(paths)
         else:
-            self._set_status("Only .pcd files (or folders containing them) can be dropped.")
+            self._set_status("Only scans (PCD, PLY, LAS, LAZ, E57) or folders containing them can be dropped.")
 
     def _add_dialog(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Add point clouds", "",
-                                                "Point clouds (*.pcd);;All files (*)")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add point clouds", "", input_filter())
         if paths:
             self.add_files(paths)
 
     def _add_folder_dialog(self):
-        path = QFileDialog.getExistingDirectory(self, "Add every .pcd file in a folder")
+        path = QFileDialog.getExistingDirectory(self, "Add every scan in a folder")
         if path:
-            paths = find_pcd_files([path])
+            paths = find_scan_files([path])
             if paths:
                 self.add_files(paths)
             else:
-                self._set_status("No .pcd files found in that folder.")
+                self._set_status("No scans found in that folder.")
 
     def _base_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Existing merged cloud", "",
-                                              "PCD point cloud (*.pcd);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Existing merged cloud", "", input_filter())
         if not path or self._busy():
             return
         if self.base_path and self.clouds:
@@ -687,7 +688,7 @@ class MainWindow(QMainWindow):
         self.clouds = [self.clouds[k] for k in keep]
         self._samples = [self._samples[k] for k in keep]
         self._loading_base = True
-        self._run(_load_files, ([path],), self._loaded, "Loading merged cloud…")
+        self._run(_load_files, ([path], True), self._loaded, "Loading merged cloud…")
 
     def add_files(self, paths):
         known = {os.path.abspath(c.path) for c in self.clouds if c.path}
@@ -996,7 +997,7 @@ class MainWindow(QMainWindow):
         data = {
             "reference": self.clouds[0].path,
             "voxel_size": self.result.voxel_size,
-            "transforms": {c.path: np.asarray(t).tolist()
+            "transforms": {_cloud_key(c): np.asarray(t).tolist()
                            for c, t in zip(self.clouds, self.result.transforms)},
         }
         if self.quality is not None:
@@ -1192,7 +1193,8 @@ def run(argv=None) -> int:
         return 0  # installing or updating; the new copy starts by itself
     win = MainWindow()
     win.show()
-    files = [a for a in (sys.argv[1:] if argv is None else argv[1:]) if a.lower().endswith(".pcd")]
+    files = find_scan_files([a for a in (sys.argv[1:] if argv is None else argv[1:])
+                             if os.path.isfile(a)])
     if files:
         win.add_files(files)
     return app.exec()

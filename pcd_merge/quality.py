@@ -166,6 +166,27 @@ class QualityReport:
             ],
         }
 
+    @classmethod
+    def from_dict(cls, d: dict, point_error=None) -> "QualityReport":
+        """Inverse of :meth:`to_dict` (``point_error`` comes from a cache)."""
+        def num(x, default=np.nan):
+            return default if x is None else float(x)
+
+        pairs = [PairQuality(a=p["clouds"][0], b=p["clouds"][1], overlap=p["overlap"],
+                             rmse=num(p["rmse"]), median=num(p["median"]), p90=num(p["p90"]),
+                             grade=p["grade"], offset=num(p["offset"]),
+                             agreement=1.0 - p.get("changed", 0.0))
+                 for p in d.get("pairs", [])]
+        clouds = d.get("clouds", [])
+        changed = [c["changed"] for c in clouds] if clouds and all(
+            c.get("changed") is not None for c in clouds) else []
+        return cls(voxel_size=d["voxel_size"], threshold=d["overlap_threshold"], pairs=pairs,
+                   cloud_overlap=[c["overlap"] for c in clouds],
+                   cloud_rmse=[num(c["rmse"]) for c in clouds],
+                   point_error=list(point_error or []),
+                   change_threshold=num(d.get("change_threshold"), np.inf),
+                   cloud_changed=changed)
+
 
 def _fmt(d: float) -> str:
     """Distance in readable units, assuming the scans are in metres."""

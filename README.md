@@ -1,7 +1,7 @@
 # PCD Merge
 
-A desktop program for LiDAR point clouds: drag in two or more `.pcd` files, it
-aligns them automatically, shows you the result in 3D, and on your OK merges
+A desktop program for LiDAR point clouds: drag in two or more scans (PCD, PLY,
+LAS/LAZ or E57), it aligns them automatically, shows you the result in 3D, and on your OK merges
 them into a single file (PCD, PLY, LAS/LAZ or E57).
 
 ![PCD Merge after aligning three scans](docs/screenshot.png)
@@ -91,7 +91,9 @@ On Linux, Open3D needs `libegl1 libgl1 libgomp1` from your package manager.
 pcd-merge            # or: python -m pcd_merge
 ```
 
-1. Drag `.pcd` files, or a whole folder (subfolders included), onto the window.
+1. Drag scans (`.pcd`, `.ply`, `.las`, `.laz`, `.e57`), or a whole folder
+   (subfolders included), onto the window. An E57 file holding several scans
+   adds each scan on its own, with its scanner position.
    *Original positions* shows the scans as they are in the files.
 2. Press **Align**. The view switches to *Aligned*, each cloud in its own colour.
 3. Check the result. Untick a file in the list to hide it. The quality report
@@ -104,7 +106,7 @@ If some clouds could not be aligned, merging asks whether to leave them out or
 merge them in their original position.
 
 **Adding new scans later.** Press **Add new scans to an existing merged
-cloud…** and pick a merged `.pcd` file you saved earlier, then add the new scans (or
+cloud…** and pick a merged cloud you saved earlier, then add the new scans (or
 the whole site folder again) and press **Align**. The merged cloud stays
 exactly where it is; the new scans are aligned to it and appended when you
 merge. Every merge writes `merged.pcd.json` next to the file with the list of
@@ -149,6 +151,18 @@ the number of points drawn is lowered automatically if the frame rate drops,
 and the full detail comes back as soon as you stop. **Detail** sets how many
 points it aims for; lower it on a slower graphics card.
 
+### Input formats
+
+| Format | What is read |
+| --- | --- |
+| `.pcd` | every field (ascii, binary, binary_compressed) |
+| `.ply` | every vertex property (ascii or binary); red/green/blue become `rgb` |
+| `.las` / `.laz` | coordinates, intensity, colour, GPS time, returns, classification, point source ID and every extra field |
+| `.e57` | each scan in the file separately, with its pose applied: coordinates (cartesian or spherical), intensity, colour, time stamp, row/column |
+
+Colour is always kept as 8 bits per channel. A LAS file this program wrote
+gives back its exact intensities (from `intensity_raw`).
+
 ### Output formats
 
 | Format | Opens in | What is kept |
@@ -163,6 +177,10 @@ as they are; fractional ones (e.g. 0-1 floats) are rescaled to the full 16-bit
 range and the exact values are also kept in an `intensity_raw` extra field.
 LAS coordinates are stored at 0.1 mm resolution. The app tells you after saving
 if anything could not be stored in the chosen format.
+
+Merging without clean-up, thinning or PCD compression is streamed: each scan is
+moved and written a few million points at a time, so the merged cloud never has
+to fit in memory. Those three options need every point at once.
 
 Voxel size is *Automatic* by default (about 40,000 points per thinned cloud).
 Set it by hand, in the scans' units, if alignment fails: larger is more robust
@@ -242,8 +260,8 @@ pcd-merge scan1.pcd scan2.pcd scan3.pcd -o merged.pcd --transforms transforms.js
 pcd-merge scan1.pcd scan2.pcd -o merged.laz --min-spacing 0.02
 ```
 
-Folders work too: `pcd-merge site_scans/ -o merged.pcd`. To add new scans to
-an earlier result (the existing merged cloud must be a `.pcd`):
+Scans can be any input format, mixed. Folders work too:
+`pcd-merge site_scans/ -o merged.pcd`. To add new scans to an earlier result:
 
 ```bash
 pcd-merge --add-to merged.pcd new_scans/ -o merged.pcd
