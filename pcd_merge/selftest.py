@@ -66,6 +66,22 @@ def run(log_path: str | None = None) -> int:
         assert len(read_pcd(out)) == sum(len(c) for c in clouds)
         log(f"merge ok: {len(merged)} points")
 
+        # Every export format, read back with its own library, so a build
+        # that is missing laspy/lazrs/pye57 (or their DLLs) fails here.
+        import laspy
+        import pye57
+
+        from .exporters import FORMATS, write_cloud
+
+        for ext in FORMATS:
+            write_cloud(os.path.join(tmp, "merged" + ext), merged)
+        for ext in (".las", ".laz"):
+            assert len(laspy.read(os.path.join(tmp, "merged" + ext)).points) == len(merged)
+        e57 = pye57.E57(os.path.join(tmp, "merged.e57"))
+        assert e57.get_header(0).point_count == len(merged)
+        e57.close()
+        log(f"export ok: {', '.join(FORMATS)}")
+
         from PySide6.QtWidgets import QApplication
 
         from .gui import HAVE_GL, MainWindow

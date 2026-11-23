@@ -19,14 +19,20 @@ def _parse(argv):
         "Run without arguments to open the desktop app.",
     )
     p.add_argument("files", nargs="*", help="PCD files; the first one is the reference frame")
-    p.add_argument("-o", "--output", help="merged PCD to write")
+    p.add_argument("-o", "--output",
+                   help="merged cloud to write; the extension picks the format: "
+                   ".pcd, .ply, .las, .laz or .e57")
     p.add_argument("--voxel", type=float, default=None,
                    help="voxel size for alignment in scan units (default: automatic)")
     p.add_argument("--seed", type=int, default=None, help="random seed for repeatable runs")
     p.add_argument("--transforms", help="write the estimated 4x4 transforms to this JSON file")
     p.add_argument("--source-field", action="store_true",
                    help="add a 'source' field saying which file each point came from")
-    p.add_argument("--compressed", action="store_true", help="write binary_compressed PCD")
+    p.add_argument("--compressed", action="store_true",
+                   help="write binary_compressed PCD (PCD output only)")
+    p.add_argument("--min-spacing", type=float, default=None, metavar="D",
+                   help="thin the merged cloud so no two points are closer than D "
+                   "(scan units); default: keep every point")
     p.add_argument("--force", action="store_true",
                    help="merge even if some clouds could not be aligned")
     p.add_argument("--selftest", action="store_true",
@@ -45,12 +51,22 @@ def main(argv=None) -> int:
 
         return run()
 
+    from .exporters import format_of, write_cloud
     from .merge import merge_clouds
-    from .pcd_io import read_pcd, write_pcd
+    from .pcd_io import read_pcd
     from .registration import AlignSettings, align
 
     if len(args.files) < 2:
         print("error: give at least two PCD files", file=sys.stderr)
+        return 2
+    if args.output:
+        try:
+            format_of(args.output)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    if args.min_spacing is not None and args.min_spacing <= 0:
+        print("error: --min-spacing must be positive", file=sys.stderr)
         return 2
 
     clouds = []
@@ -96,7 +112,14 @@ def main(argv=None) -> int:
     merged, partial = merge_clouds(clouds, result.transforms, add_source_field=args.source_field)
     if partial:
         print("note: fields missing from some files were filled with 0:", ", ".join(partial))
-    write_pcd(args.output, merged, compressed=args.compressed)
+    if args.min_spacing:
+        from .thinning import thin
+
+        before = len(merged)
+        merged = thin(merged, args.min_spacing)
+        print(f"Thinned to {args.min_spacing:g} spacing: kept {len(merged):,} of {before:,} points")
+    for note in write_cloud(args.output, merged, compressed=args.compressed):
+        print("note:", note)
     print(f"Wrote {len(merged):,} points to {args.output}")
     return 0
 
