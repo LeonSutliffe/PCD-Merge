@@ -42,7 +42,7 @@ from .exporters import FORMATS, file_filter
 from .files import already_merged, find_pcd_files, read_manifest, save_merged
 from .flyscene import build_scene
 from .pcd_io import PointCloud, read_pcd
-from .quality import (NO_OVERLAP, QualityReport, assess, colour_stops, error_colours,
+from .quality import (CHANGED, NO_OVERLAP, QualityReport, assess, colour_stops, error_colours,
                       fmt_distance)
 from .registration import AlignResult, AlignSettings, align
 
@@ -456,8 +456,16 @@ class MainWindow(QMainWindow):
         grey.fill(QColor.fromRgbF(*NO_OVERLAP))
         swatch = QLabel()
         swatch.setPixmap(grey)
-        for w in (QLabel("Error:"), self.legend_lo, bar, self.legend_hi, QLabel("  "), swatch,
-                  QLabel("no overlap")):
+        magenta = QPixmap(12, 12)
+        magenta.fill(QColor.fromRgbF(*CHANGED))
+        swatch_changed = QLabel()
+        swatch_changed.setPixmap(magenta)
+        swatch_changed.setToolTip(
+            "Seen differently by the scans: moved objects, people, opened doors. "
+            "These don't lower the grade unless most of the overlap is like this, "
+            "which points to a misalignment instead.")
+        for w in (QLabel("Error:"), self.legend_lo, bar, self.legend_hi, QLabel("  "),
+                  swatch_changed, QLabel("changed"), QLabel("  "), swatch, QLabel("no overlap")):
             lg.addWidget(w)
         self.legend.hide()
         bottom.addWidget(self.legend)
@@ -805,7 +813,7 @@ class MainWindow(QMainWindow):
             lines += ["", "Try Retry: each press uses a coarser voxel size and more search "
                       "attempts, and the best result is kept."]
         self.report.setPlainText("\n".join(lines))
-        self.legend_hi.setText(f"≥ {fmt_distance(quality.scale_max)}")
+        self.legend_hi.setText(fmt_distance(quality.scale_max))
         self.rb_aligned.setChecked(True)
         if grade != "Good":
             self.colour_mode.setCurrentIndex(1)  # show where the clouds disagree
