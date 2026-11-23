@@ -1,8 +1,17 @@
 name: tests
 
+# Fast checks (a few minutes on Linux). Runs on every PR and on main.
+
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # a new push to a PR cancels the run for the previous push
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -10,11 +19,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.12"
       - name: System libraries for Open3D
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libgomp1
-      - name: Install
-        run: pip install -e ".[test]"
+        run: sudo apt-get install -y --no-install-recommends libegl1 libgl1 libgomp1 || (sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libgomp1)
+
+      # The whole environment (Open3D, PySide6, ...) is cached and only rebuilt
+      # when the dependencies in pyproject.toml / requirements.txt change.
+      - name: Restore Python environment
+        id: venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ steps.py.outputs.python-version }}-test-${{ hashFiles('pyproject.toml', 'requirements.txt') }}
+      - name: Install dependencies
+        if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install ".[test]"
+      - name: Install this version of the package
+        run: .venv/bin/pip install --no-deps --force-reinstall -e .
       - name: Run tests
-        run: pytest -q
+        run: .venv/bin/pytest -q

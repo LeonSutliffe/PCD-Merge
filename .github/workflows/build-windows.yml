@@ -1,40 +1,100 @@
 name: windows build
 
-# Builds the bundled Windows program and tests it on every push and PR.
-# On main, when pcd_merge/__init__.py has a version with no release yet,
-# a GitHub release v<version> is published with the zip. Installed copies
-# find it the next time they start.
+# Builds the bundled Windows program (~150 MB) and tests it. This is the slow
+# check, so it only runs when something that affects the bundle changes:
+#   - on a PR or on main, when packaging, dependencies, the updater/installer,
+#     the self-test or this workflow change;
+#   - on demand: Actions > windows build > Run workflow (pick any branch);
+#   - as part of every release (release.yml calls it).
+# It never publishes anything itself; release.yml does that.
 
 on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".github/workflows/build-windows.yml"
+      - "pcd_merge/updater.py"
+      - "pcd_merge/startup.py"
+      - "pcd_merge/selftest.py"
+      - "pcd_merge/cli.py"
+      - "pcd_merge/__main__.py"
   push:
     branches: [main]
-  pull_request:
+    paths:
+      - "packaging/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".github/workflows/build-windows.yml"
+      - "pcd_merge/updater.py"
+      - "pcd_merge/startup.py"
+      - "pcd_merge/selftest.py"
+      - "pcd_merge/cli.py"
+      - "pcd_merge/__main__.py"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to stamp into the build (empty: keep pcd_merge/__init__.py)"
+        type: string
+        default: ""
+    outputs:
+      zip:
+        description: "File name of the built zip (uploaded as an artifact of the same name)"
+        value: ${{ jobs.build.outputs.zip }}
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      zip: ${{ steps.zip.outputs.name }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.12"
 
-      - name: Install
+      - name: Stamp release version
+        if: inputs.version != ''
+        shell: bash
+        run: sed -i -E 's/^__version__ = .*/__version__ = "${{ inputs.version }}"/' pcd_merge/__init__.py
+
+      # Open3D, PySide6, PyInstaller etc. are cached as a whole environment and
+      # only reinstalled when pyproject.toml / requirements.txt change.
+      - name: Restore Python environment
+        id: venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ steps.py.outputs.python-version }}-build-${{ hashFiles('pyproject.toml', 'requirements.txt') }}
+      - name: Install dependencies
+        if: steps.venv.outputs.cache-hit != 'true'
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          pip install . pyinstaller python-lzf
+          python -m venv .venv
+          .venv/Scripts/python -m pip install --upgrade pip
+          .venv/Scripts/pip install ".[build]"
+      - name: Install this version of the package
+        shell: bash
+        run: .venv/Scripts/pip install --no-deps --force-reinstall .
 
       - name: Version
         id: version
         shell: bash
-        run: echo "version=$(python -c 'import pcd_merge; print(pcd_merge.__version__)')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(.venv/Scripts/python -c 'import pcd_merge; print(pcd_merge.__version__)')" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        run: pyinstaller --noconfirm packaging/pcd_merge.spec
+        shell: bash
+        run: .venv/Scripts/pyinstaller --noconfirm packaging/pcd_merge.spec
 
       - name: Self-test the built program
         shell: pwsh
@@ -45,7 +105,8 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "self-test failed with exit code $($p.ExitCode)" }
 
       - name: Test update swap and shortcuts
-        run: python packaging/ci_windows_check.py "dist/PCD Merge"
+        shell: bash
+        run: .venv/Scripts/python packaging/ci_windows_check.py "dist/PCD Merge"
 
       - name: Zip
         id: zip
@@ -61,18 +122,3 @@ jobs:
           name: ${{ steps.zip.outputs.name }}
           path: ${{ steps.zip.outputs.name }}
           retention-days: 14
-
-      - name: Publish release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" > /dev/null 2>&1; then
-            echo "Release $tag already exists; bump the version in pcd_merge/__init__.py to publish a new one."
-            exit 0
-          fi
-          gh release create "$tag" "${{ steps.zip.outputs.name }}" \
-            --title "PCD Merge ${{ steps.version.outputs.version }}" \
-            --target "${{ github.sha }}" --generate-notes

@@ -236,12 +236,23 @@ GPU acceleration is not used: the Windows build of Open3D is CPU-only.
 
 ## Releasing a new version
 
-1. Bump `__version__` in `pcd_merge/__init__.py` (e.g. `0.2.0` → `0.3.0`).
-2. Merge to `main`. The *windows build* workflow builds and tests the bundled
-   program and publishes release `v0.3.0` with the zip.
-3. Installed copies offer the update the next time they start.
+Merging a PR no longer publishes anything, and PRs don't need to change the
+version. Merge as many PRs as you like, then when you're ready:
 
-Every PR also gets a test build of the zip under the workflow run's artifacts.
+1. On GitHub open **Actions > release > Run workflow** (branch `main`).
+2. Leave *minor* selected (0.7.1 → 0.8.0), or pick *patch* / *major*, or type an
+   exact version. Press **Run workflow**.
+3. About 10 minutes later release `v0.8.0` is published with the zip, and the
+   version bump is committed to `main`. Release notes list the PRs merged since
+   the previous release.
+4. Installed copies offer the update the next time they start.
+
+If the build or its tests fail, nothing is published.
+
+Checks on PRs: the quick tests run on every PR. The full Windows build (slow)
+only runs when packaging, dependencies, the updater or the self-test change; to
+build any branch anyway, use **Actions > windows build > Run workflow**. Its zip
+is under the run's artifacts.
 To build locally on Windows: `pip install -e ".[build]"` then
 `pyinstaller packaging/pcd_merge.spec` (output in `dist\PCD Merge`).
 
