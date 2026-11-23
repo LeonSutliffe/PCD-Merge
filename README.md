@@ -37,8 +37,11 @@ them into a single file (PCD, PLY, LAS/LAZ or E57).
 
 The app reports, for every pair, how much of the clouds overlap after
 alignment, and warns when a cloud overlaps the others by less than 30% or could
-not be matched at all. In that case press **Retry** (new random start) or try a
-larger voxel size.
+not be matched at all. In that case press **Retry**. Each press tries something
+different: a coarser voxel size (1.5×, then 2×, then 3× the first try) with
+more search attempts, which helps with repetitive or low-detail scenes. Every
+try is graded on the same scale as the first, and the best result so far is
+the one shown and merged. Press **Align** to start over.
 
 ## Install on Windows (no Python needed)
 

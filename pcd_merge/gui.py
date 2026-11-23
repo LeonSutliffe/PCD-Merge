@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__
+from . import __version__, retry
 from .cleanup import CleanupOptions
 from .exporters import FORMATS, file_filter
 from .files import already_merged, find_pcd_files, read_manifest, save_merged
@@ -145,7 +145,15 @@ def _load_files(paths, progress):
     return out, errors
 
 
-def _align_clouds(clouds, settings, previews, progress):
+def _align_clouds(clouds, settings, previews, quality_ref=None, *, progress):
+    """Align, then grade the result.
+
+    ``quality_ref`` is ``(clouds, voxel)`` from the first Align. Retries use
+    coarser voxel sizes, and the grade limits scale with the voxel size, so
+    retries are graded against the first Align's clouds and voxel size to
+    keep grades comparable (and Retry from looking better just by being
+    coarser).
+    """
     # Bound methods: each full-size coordinate array is made only when needed,
     # one at a time.
     xyz = [c.finite_xyz for c in clouds]
@@ -156,8 +164,8 @@ def _align_clouds(clouds, settings, previews, progress):
     result = align(xyz, settings, align_progress)
     progress("Measuring alignment quality", 0.92)
     # Reuse the downsampled clouds from alignment instead of the full ones.
-    quality = assess(result.fine or xyz, result.transforms, result.voxel_size,
-                     preview_xyz=previews)
+    q_xyz, q_voxel = quality_ref or (result.fine or xyz, result.voxel_size)
+    quality = assess(q_xyz, result.transforms, q_voxel, preview_xyz=previews)
     return result, quality
 
 
@@ -201,6 +209,7 @@ class MainWindow(QMainWindow):
         self.previews: list[np.ndarray] = []  # subsampled xyz per cloud, as drawn
         self._samples: list[np.ndarray] = []  # random preview sample per cloud
         self.result: AlignResult | None = None
+        self._reset_retries()
         self.quality: QualityReport | None = None
         self._thread: QThread | None = None
         self._worker: _Worker | None = None
@@ -287,8 +296,11 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         self.b_retry = QPushButton("Retry")
-        self.b_retry.setToolTip("Run the alignment again with a different random start.")
-        self.b_retry.clicked.connect(lambda: self._start_align(new_seed=True))
+        self.b_retry.setToolTip(
+            "Try again with a coarser voxel size and more search attempts, which helps with "
+            "repetitive or low-detail scenes. Each press goes coarser (1.5×, 2×, 3× the first "
+            "try). The best result so far is kept.")
+        self.b_retry.clicked.connect(self._retry)
         self.b_merge = QPushButton("Accept and merge…")
         self.b_merge.setStyleSheet("font-weight: bold; padding: 6px;")
         self.b_merge.clicked.connect(self._merge)
@@ -705,6 +717,7 @@ class MainWindow(QMainWindow):
     def _invalidate(self):
         self.result = None
         self.quality = None
+        self._reset_retries()
         self.report.clear()
         self.grade_label.hide()
         self.colour_mode.setCurrentIndex(0)
@@ -712,17 +725,66 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- align
 
-    def _start_align(self, new_seed: bool):
+    def _reset_retries(self):
+        self._retry_press = 0  # how many times Retry was pressed since Align
+        self._retry_base = None  # (settings, voxel, quality clouds) of the first Align
+        self._best = None  # (result, quality, label) best so far
+        self._last_label = ""
+        if hasattr(self, "b_retry"):
+            self.b_retry.setText("Retry")
+
+    def _base_settings(self, seed: int) -> AlignSettings:
+        return AlignSettings(voxel_size=self.voxel.value() or None, seed=seed,
+                             anchor=self.base_path is not None)
+
+    def _start_align(self, new_seed: bool = False):
+        """Align (a fresh start: forgets earlier retries)."""
         if len(self.clouds) < 2:
             return
+        self._reset_retries()
         seed = random.randrange(1 << 30) if new_seed else 0
-        settings = AlignSettings(voxel_size=self.voxel.value() or None, seed=seed,
-                                 anchor=self.base_path is not None)
-        self._run(_align_clouds, (list(self.clouds), settings, list(self.previews)),
+        self._last_label = "first try"
+        self._run(_align_clouds, (list(self.clouds), self._base_settings(seed),
+                                  list(self.previews)),
                   self._aligned, "Aligning…")
+
+    def _retry(self):
+        if len(self.clouds) < 2:
+            return
+        if self._retry_base is None:  # no Align yet in this session of retries
+            self._start_align(new_seed=True)
+            return
+        base, base_voxel, q_ref = self._retry_base
+        self._retry_press += 1
+        settings = retry.settings_for(base, base_voxel, self._retry_press,
+                                      random.randrange(1 << 30))
+        lv = retry.level(self._retry_press)
+        self._last_label = f"retry {self._retry_press}: {lv.describe(settings.voxel_size)}"
+        self._run(_align_clouds, (list(self.clouds), settings, list(self.previews), q_ref),
+                  self._aligned,
+                  f"Retrying with a coarser voxel size ({settings.voxel_size:.3g})…")
 
     def _aligned(self, payload):
         result, quality = payload
+        label = self._last_label
+        if self._retry_base is None:  # first Align: retries escalate from here
+            self._retry_base = (self._base_settings(0), result.voxel_size,
+                                (result.fine, result.voxel_size) if result.fine else None)
+        note = ""
+        if retry.is_better((result, quality), self._best and self._best[:2]):
+            self._best = (result, quality, label)
+            if self._retry_press:
+                note = f"Retry {self._retry_press} improved the result."
+        else:
+            kept = self._best[2]
+            note = (f"Retry {self._retry_press} gave {quality.grade} "
+                    f"({label}); keeping the better result from the {kept}.")
+            result, quality, label = self._best
+        if self._retry_press:
+            nxt = retry.level(self._retry_press + 1)
+            self.b_retry.setText(f"Retry ({nxt.voxel_factor:g}× coarser)")
+        else:
+            self.b_retry.setText(f"Retry ({retry.level(1).voxel_factor:g}× coarser)")
         self.result, self.quality = result, quality
         grade = quality.grade
         self.grade_label.setText(f"Alignment quality: {grade}")
@@ -736,8 +798,12 @@ class MainWindow(QMainWindow):
         warns = result.warnings()
         if warns:
             lines += ["", "Warnings:"] + ["  " + w for w in warns]
+        lines += ["", f"Shown: {label}."]
+        if note:
+            lines += [note]
         if warns or grade != "Good":
-            lines += ["", "Try Retry, or a larger voxel size."]
+            lines += ["", "Try Retry: each press uses a coarser voxel size and more search "
+                      "attempts, and the best result is kept."]
         self.report.setPlainText("\n".join(lines))
         self.legend_hi.setText(f"≥ {fmt_distance(quality.scale_max)}")
         self.rb_aligned.setChecked(True)
