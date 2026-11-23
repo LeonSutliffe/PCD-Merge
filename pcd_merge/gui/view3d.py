@@ -34,6 +34,7 @@ CAMERAS = {"Orbit": None, "Top": (90, -90), "Front": (0, -90), "Side": (0, 0)}
 
 class View3D(QWidget):
     walk_requested = Signal()
+    walk_fallback = Signal(str)  # the walk-through opened in its own window (the error)
     selection_changed = Signal()
 
     NAV_HINT = "Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom"
@@ -453,11 +454,26 @@ class View3D(QWidget):
         from ..flythrough import FlyThroughWindow
 
         self.leave_walk()
-        self._walk = FlyThroughWindow(scene, title, parent=self, on_exit=self.leave_walk)
-        self.stack.addWidget(self._walk)
-        self.stack.setCurrentWidget(self._walk)
+        try:
+            self._walk = FlyThroughWindow(scene, title, parent=self, on_exit=self.leave_walk)
+            self._walk.on_gl_failed = lambda err: self._walk_in_window(scene, title, err)
+            self.stack.addWidget(self._walk)
+            self.stack.setCurrentWidget(self._walk)
+        except Exception as e:  # pragma: no cover - depends on the graphics driver
+            self._walk = None
+            self._walk_in_window(scene, title, f"{type(e).__name__}: {e}")
+            return
         self.toolbar.hide()
         self.bottom.hide()
+
+    def _walk_in_window(self, scene, title, error: str):
+        """Fallback: the walk-through in a window of its own (as before 0.9)."""
+        from ..flythrough import FlyThroughWindow
+
+        self._walk_window = FlyThroughWindow(scene, title)  # kept so it is not collected
+        self._walk_window.show()
+        self._walk_window.raise_()
+        self.walk_fallback.emit(error)
 
     def leave_walk(self):
         if self._walk is None:
