@@ -470,6 +470,10 @@ class FlyThroughWindow(QWidget):
                               "Ctrl for 4x slower.")
         self.speed.valueChanged.connect(lambda v: self.view.set_speed(v))
         top.addWidget(self.speed)
+        if self.embedded:  # narrower: the main window has side panels
+            top.addStretch(1)
+            lay.addLayout(top)
+            top = QHBoxLayout()
         self.follow = QCheckBox("Fly where I look")
         self.follow.setToolTip("Off: W/S move level, like walking, and Space/C go up and "
                                "down. On: W flies in the direction you are looking.")

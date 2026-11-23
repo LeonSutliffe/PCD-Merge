@@ -89,7 +89,31 @@ On Linux, Open3D needs `libegl1 libgl1 libgomp1` from your package manager.
 
 ```bash
 pcd-merge            # or: python -m pcd_merge
+pcd-merge "Office.pcdproj"   # open a project
 ```
+
+The window has three parts and a row of mode tabs at the top right:
+
+* **Left, the project:** the scans (tick to show or hide, double-click a
+  missing one to point to where it is now), and the exports made from the
+  project. *Parts* and *Measurements* fill in with Edit (0.10) and Inspect
+  (0.11).
+* **Middle, the 3D view:** orbit, top / front / side, an orthographic option,
+  and **Walk through** (first person) inside the same view.
+* **Right, the settings of the current mode.** **Align** has everything below.
+  **Edit** and **Inspect** say what is coming; the view works in them already.
+
+**Projects.** *File > Save project as…* makes a folder `Name.pcdproj` that
+remembers the scans, the alignment, the quality report, the settings and the
+exports. From then on it saves itself after every change. Opening it again
+(*File > Open project…* or *Open recent*) shows the aligned view straight away
+from its cache, without re-reading the scans; they are read only when
+something needs them (Align, the walk-through, clean-up). The scan files are
+never changed. If they were moved, the app says so; point to one and the others
+in the same folder are found too. Move the project and the scans together and
+it finds them by itself. *Copy scans into the project* makes a project you can
+hand over on its own. *Open a merged cloud as a new project* starts from a
+cloud merged earlier, to add new scans to it.
 
 1. Drag scans (`.pcd`, `.ply`, `.las`, `.laz`, `.e57`), or a whole folder
    (subfolders included), onto the window. An E57 file holding several scans
@@ -122,11 +146,11 @@ every point.
 
 ### Walk-through (first person)
 
-Press **Walk through…** above the 3D view to open the scan in a first-person
-window and walk or fly around inside it. It shows what the 3D view shows: the
+Press **Walk through** above the 3D view to walk or fly around inside the scan,
+in the same view (Esc or **Leave walk-through** goes back to orbiting). It shows what the 3D view shows: the
 aligned clouds after **Align** (or their original positions), and only the
 files that are ticked. To walk through a merged file you saved earlier, load
-just that file and press **Walk through…**.
+just that file and press **Walk through**.
 
 | | |
 |---|---|
@@ -282,9 +306,9 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned: GPU acceleration for very large scans (NVIDIA).
-* Planned: a manual fallback where you pick a few matching points in two clouds
-  to give the alignment a start.
+* Planned (see `docs/plan-1.0.md`): Edit mode with selection, delete and split
+  (0.10); Inspect mode with a full-quality COPC viewing file and measuring, and a
+  manual 3-point alignment fallback (0.11).
 
 ## Large scans
 
