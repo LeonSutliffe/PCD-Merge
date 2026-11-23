@@ -439,12 +439,20 @@ class Project:
         self.exports = [e for e in self.exports
                         if os.path.normcase(e.get("path", "")) != os.path.normcase(path)]
 
-    def save_export_preview(self, export: dict, xyz: np.ndarray) -> None:
+    def save_export_preview(self, export: dict, xyz: np.ndarray, attrs=None) -> None:
         if not self.folder or not export.get("hash"):
             return
         path = os.path.join(self.cache_dir, f"export-{export['hash']}.npy")
         np.save(path + ".part.npy", np.asarray(xyz, dtype=np.float64))
         os.replace(path + ".part.npy", path)
+        if attrs is not None:
+            _save_attrs(os.path.join(self.cache_dir, f"export-{export['hash']}-attrs.npz"),
+                        attrs)
+
+    def load_export_attrs(self, export: dict) -> dict | None:
+        if not self.folder or not export.get("hash"):
+            return None
+        return _load_attrs(os.path.join(self.cache_dir, f"export-{export['hash']}-attrs.npz"))
 
     def load_export_preview(self, export: dict) -> np.ndarray | None:
         if not self.folder or not export.get("hash"):
@@ -460,14 +468,24 @@ class Project:
     def _cache_file(self, entry: ScanEntry, what: str) -> str:
         return os.path.join(self.cache_dir, f"{what}-{entry.cache_name()}.npy")
 
-    def save_preview(self, entry: ScanEntry, xyz: np.ndarray) -> None:
-        """Keep a scan's preview sample (random order) for fast reopening."""
+    def save_preview(self, entry: ScanEntry, xyz: np.ndarray, attrs=None) -> None:
+        """Keep a scan's preview sample (random order) for fast reopening, and
+        the same points' intensity and colour (``attrs``) if given."""
         if not self.folder:
             return
         path = self._cache_file(entry, "preview")
         tmp = path + ".part.npy"
         np.save(tmp, np.asarray(xyz, dtype=np.float64))
         os.replace(tmp, path)
+        if attrs is not None:
+            _save_attrs(self._cache_file(entry, "attrs")[:-4] + ".npz", attrs)
+
+    def load_attrs(self, entry: ScanEntry) -> dict | None:
+        """The cached intensity / colour of the preview points (None: not cached,
+        e.g. a project made before 0.11)."""
+        if not entry.hash or not self.folder:
+            return None
+        return _load_attrs(self._cache_file(entry, "attrs")[:-4] + ".npz")
 
     def load_preview(self, entry: ScanEntry) -> np.ndarray | None:
         """The cached preview sample, or None if missing or the scan changed."""
@@ -559,6 +577,20 @@ def from_manifest(merged_path: str, folder: str) -> Project:
 
 # --------------------------------------------------------------------------
 # Recent projects (stored in the user's settings folder, not in the project)
+
+
+def _save_attrs(path: str, attrs: dict) -> None:
+    tmp = path[:-4] + ".part.npz"
+    np.savez(tmp, **{k: np.asarray(v) for k, v in attrs.items()}, _ok=np.ones(1))
+    os.replace(tmp, path)
+
+
+def _load_attrs(path: str) -> dict | None:
+    try:
+        with np.load(path) as z:
+            return {k: z[k] for k in z.files if k != "_ok"}
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def config_dir() -> str:

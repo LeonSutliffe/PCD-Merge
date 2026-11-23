@@ -331,7 +331,7 @@ class MainWindow(QMainWindow):
         loaded, errors = payload
         doc = self.doc
         had = doc.keys()
-        loaded = [(c, s) for c, s in loaded if base or _key(c) not in had]
+        loaded = [t for t in loaded if base or _key(t[0]) not in had]
         doc.add_loaded(loaded, base=base)
         if base and doc.base is not None:
             done = set(already_merged(read_manifest(doc.base.entry.path),
@@ -471,7 +471,8 @@ class MainWindow(QMainWindow):
         """Show or hide a merged cloud in the view (its preview is read once,
         streamed, then kept in the project's cache)."""
         self.doc.set_export_visible(path, on)
-        if not on or self.doc.cached_export_sample(path) is not None:
+        if not on or (self.doc.cached_export_sample(path) is not None
+                      and path in self.doc.export_attrs):
             self.view.redraw()
             return
         if not os.path.isfile(path):
@@ -479,8 +480,8 @@ class MainWindow(QMainWindow):
             return
 
         def done(payload):
-            p, xyz = payload
-            self.doc.set_export_sample(p, xyz)
+            p, xyz, attrs = payload
+            self.doc.set_export_sample(p, xyz, attrs)
             self.tasks.set_status(f"Showing {os.path.basename(p)}.")
 
         if not self.tasks.run(sample_file, (path,), done, "Reading the merged cloud…"):
@@ -516,7 +517,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "PCD Merge", "\n\n".join(msg))
         self.tasks.set_status(f"Opened {self.doc.project.name}.")
         need = [(i, s.entry) for i, s in enumerate(self.doc.scans)
-                if not len(s.sample) and s.entry.status() != "missing"]
+                if (not len(s.sample) or s.attrs is None) and s.entry.status() != "missing"]
         if need:
             self.tasks.run(sample_missing, (need,), self._sampled, "Reading previews…")
 

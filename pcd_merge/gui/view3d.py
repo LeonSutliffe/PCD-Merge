@@ -82,11 +82,14 @@ class View3D(QWidget):
         top.addSpacing(12)
         top.addWidget(QLabel("Colour:"))
         self.colour_mode = QComboBox()
-        self.colour_mode.addItems(["Per scan", "Alignment error", "Height"])
+        self.colour_mode.addItems(["Per scan", "Alignment error", "Height", "Intensity",
+                                   "RGB colour"])
         self.colour_mode.setToolTip(
             "Alignment error colours each point by its distance to the surface of the other "
             "scans: blue fits, red is off. Grey points are seen by only one scan. "
-            "Height goes from blue (low) to red (high), which makes floors easy to tell apart.")
+            "Height goes from blue (low) to red (high), which makes floors easy to tell apart. "
+            "Intensity shows how strongly each point reflected the laser (dark to light). "
+            "RGB colour uses the scans' own colours, where they have them.")
         self.colour_mode.currentIndexChanged.connect(self.redraw)
         top.addWidget(self.colour_mode)
         top.addStretch(1)
@@ -186,8 +189,16 @@ class View3D(QWidget):
             self.rb_aligned.setChecked(True)
         # edits are made where the scans are aligned, so Edit always shows that
         self.rb_orig.setEnabled(not (self.edit_mode and doc.aligned))
-        self.colour_mode.model().item(1).setEnabled(doc.quality is not None)
-        if doc.quality is None and self.colour_mode.currentIndex() == 1:
+        model = self.colour_mode.model()
+        model.item(1).setEnabled(doc.quality is not None)
+        have = {k: any(k in (s.attrs or {}) for s in doc.scans)
+                or any(k in (a or {}) for a in doc.export_attrs.values())
+                for k in ("intensity", "rgb")}
+        model.item(3).setEnabled(have["intensity"])
+        model.item(4).setEnabled(have["rgb"])
+        k = self.colour_mode.currentIndex()
+        if (k == 1 and doc.quality is None) or (k == 3 and not have["intensity"]) \
+                or (k == 4 and not have["rgb"]):
             self.colour_mode.setCurrentIndex(0)
         self.b_walk.setEnabled(not busy and bool(doc.scans) and HAVE_GL)
 
@@ -226,7 +237,10 @@ class View3D(QWidget):
         if q is not None:
             self.legend_hi.setText(fmt_distance(q.scale_max))
         size = float(self.pt_size.value())
-        height = self.colour_mode.currentIndex() == 2 and self._height_range(aligned)
+        mode = self.colour_mode.currentIndex()
+        height = mode == 2 and self._height_range(aligned)
+        attr = {3: "intensity", 4: "rgb"}.get(mode)
+        irange = self._intensity_range() if attr == "intensity" else None
         for i, (xyz, scan) in enumerate(zip(previews, doc.scans)):
             if not scan.entry.visible or not len(xyz):
                 continue
@@ -236,8 +250,11 @@ class View3D(QWidget):
                 lo, span = height
                 color = error_colours(np.clip(pts[:, 2] - lo, 0.0, span), span)
             pts = (pts - origin).astype(np.float32)
+            vals = (scan.attrs or {}).get(attr) if attr else None
             if height:
                 pass  # coloured above, from the real heights
+            elif vals is not None and len(vals) >= len(pts):
+                color = _attr_colours(attr, vals[:len(pts)], irange)
             elif heat and len(q.point_error[i]) >= len(pts):
                 color = error_colours(q.point_error[i][:len(pts)], q.scale_max)
             else:
@@ -260,8 +277,29 @@ class View3D(QWidget):
                 if isinstance(color, np.ndarray) and color.ndim == 2:
                     color = color[keep]
             self._add_points(pts, color, size)
-        for xyz in doc.visible_exports():
-            self._add_points((xyz - origin).astype(np.float32), (*EXPORT_COLOUR, 1.0), size)
+        for xyz, attrs in zip(doc.visible_exports(), doc.visible_export_attrs()):
+            vals = (attrs or {}).get(attr) if attr else None
+            if height:
+                lo, span = height
+                color = error_colours(np.clip(xyz[:, 2] - lo, 0.0, span), span)
+            elif vals is not None and len(vals) == len(xyz):
+                color = _attr_colours(attr, vals, irange)
+            else:
+                color = (*EXPORT_COLOUR, 1.0)
+            self._add_points((xyz - origin).astype(np.float32), color, size)
+
+    def _intensity_range(self):
+        """(low, high) intensity over what is shown, ignoring the odd outlier."""
+        vals = [s.attrs["intensity"] for s in self.doc.scans
+                if s.entry.visible and s.attrs and "intensity" in s.attrs]
+        vals += [a["intensity"] for a in self.doc.visible_export_attrs()
+                 if a and "intensity" in a]
+        v = np.concatenate([x[:200_000] for x in vals]) if vals else np.zeros(0)
+        v = v[np.isfinite(v)]
+        if not len(v):
+            return 0.0, 1.0
+        lo, hi = np.percentile(v, 1), np.percentile(v, 99)
+        return float(lo), float(hi if hi > lo else lo + 1.0)
 
     def _height_range(self, aligned):
         """(lowest, span) of the shown points' heights, ignoring the odd stray."""
@@ -550,6 +588,19 @@ class _ToolFilter(QObject):
             tool.leave()
             owner.overlay.update()
         return False
+
+
+def _attr_colours(attr: str, vals: np.ndarray, irange) -> np.ndarray:
+    """RGBA colours from intensity (grey, dark to light) or 8-bit RGB."""
+    out = np.ones((len(vals), 4), np.float32)
+    if attr == "rgb":
+        out[:, :3] = np.asarray(vals, np.float32) / 255.0
+    else:
+        lo, hi = irange
+        g = np.clip((np.asarray(vals, np.float64) - lo) / (hi - lo), 0.0, 1.0)
+        g = np.nan_to_num(g, nan=0.0) ** 0.8 * 0.92 + 0.08  # never quite black
+        out[:, 0] = out[:, 1] = out[:, 2] = g
+    return out
 
 
 def _swatch(rgb) -> QPixmap:

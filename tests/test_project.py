@@ -210,3 +210,16 @@ def test_quick_hash_and_folder_names(tmp_path):
     assert quick_hash(str(p)) != h
     assert project_folder(str(tmp_path / "x")) == str(tmp_path / "x.pcdproj")
     assert project_folder(str(tmp_path / "x.pcdproj" / "project.json")) == str(tmp_path / "x.pcdproj")
+
+
+def test_preview_colours_are_cached_with_the_preview(site):
+    _, proj, _ = site
+    xyz = np.zeros((5, 3))
+    attrs = {"intensity": np.arange(5, dtype=np.float32),
+             "rgb": np.full((5, 3), 7, np.uint8)}
+    assert proj.load_attrs(proj.scans[0]) is None
+    proj.save_preview(proj.scans[0], xyz, attrs)
+    got = proj.load_attrs(proj.scans[0])
+    assert np.array_equal(got["intensity"], attrs["intensity"]) and got["rgb"].dtype == np.uint8
+    proj.save_preview(proj.scans[1], xyz, {})  # no intensity or colour: cached as such
+    assert proj.load_attrs(proj.scans[1]) == {}

@@ -370,3 +370,40 @@ def test_unexpected_errors_are_shown_and_logged(tmp_path, monkeypatch, qtbot):
     assert boxes and "ValueError: boom" in boxes[0]
     log = (tmp_path / "cfg" / "error.log").read_text()
     assert "ValueError: boom" in log and "Traceback" in log
+
+
+def test_colour_by_intensity_and_rgb(window, qtbot, scans, tmp_path):
+    from pcd_merge.pcd_io import write_pcd
+    from pcd_merge.readers import pack_rgb
+
+    # a scan with colour as well as intensity
+    d = read_cloud(scans[0]).data
+    rgb = np.zeros(len(d), dtype=[(n, d.dtype[n]) for n in d.dtype.names] + [("rgb", "<f4")])
+    for n in d.dtype.names:
+        rgb[n] = d[n]
+    rgb["rgb"] = pack_rgb(np.full(len(d), 200), np.full(len(d), 10), np.full(len(d), 30))
+    coloured = str(tmp_path / "coloured.pcd")
+    write_pcd(coloured, rgb)
+
+    win = window()
+    win.load_paths([coloured])
+    _wait(qtbot, win)
+    view, doc = win.view, win.doc
+    scan = doc.scans[0]
+    assert set(scan.attrs) == {"intensity", "rgb"} and len(scan.attrs["rgb"]) == len(scan.sample)
+    assert scan.attrs["rgb"][0].tolist() == [200, 10, 30]
+    model = view.colour_mode.model()
+    assert model.item(3).isEnabled() and model.item(4).isEnabled()
+    for k in (3, 4):
+        view.colour_mode.setCurrentIndex(k)
+        view.redraw()
+        colours = view._items[-1].color
+        assert colours.ndim == 2 and len(colours) > 0
+    assert np.allclose(colours[0, :3], [200 / 255, 10 / 255, 30 / 255], atol=1e-3)
+
+    # the colours come back from the cache when the project is reopened
+    doc.save_as(str(tmp_path / "Coloured"))
+    other = window()
+    other.open_project(doc.project.folder)
+    assert not other.tasks.busy
+    assert np.array_equal(other.doc.scans[0].attrs["intensity"], scan.attrs["intensity"])
