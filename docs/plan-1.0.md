@@ -1,6 +1,7 @@
 # PCD Merge 1.0: feature set and how the app works
 
-Status: proposal for Leon to decide on (2026-11-23). No code yet.
+Status: proposal for Leon to decide on (2026-11-23), restructured around
+Leon's three modes. No code yet.
 
 ## Where we are (0.8.0)
 
@@ -33,67 +34,129 @@ What it does not have, and what stops it being "more than an aligner":
 
 ## The idea for 1.0
 
-> Turn the app from "a merge button" into a small **site workspace**: one
-> project per building, the scans stay untouched, and the user can go from raw
-> scans to the things they hand over (measurements, sections, plan
-> outlines, a cleaned and thinned cloud, a short report) without leaving it.
+> Turn the app from "a merge button" into a **site workspace with three
+> modes**: **Align**, **Edit** and **Inspect** (Leon's structure, 2026-11-23).
+> One project per building, the original scans are never changed, and the
+> user moves between the modes with tabs at the top of the window.
 
-Alignment stays the core and the reason people start the app. Everything new
-works on the aligned scans, so it is useful before or without a merge.
+| Mode | Job | Quality vs speed | Can change data? |
+|---|---|---|---|
+| **1. Align** | Everything for getting scans into one frame and converting them: import, auto-align, Retry, manual 3-point alignment, quality report, merge, export/convert formats, min spacing, batch and incremental site work. | Downsampled for alignment, full resolution for merge (as today). | Transforms only |
+| **2. Edit** | Check alignment and scan quality in orbit or walk-through, and clean the scans up: pick, brush, lasso and box selection, delete, split along a line or plane, plus the automatic clean-up (dedup, noise, moving objects). | Speed first: level-of-detail drawing, a detail slider, may drop points while moving. Edits still apply to every full-resolution point. | Yes, all undoable |
+| **3. Inspect** | Read-only viewing at full quality: orbit and walk-through, click-to-measure in 3D, saved measurements, screenshots. | Quality first: a prepared viewing file streams every point. | No (only measurements and notes, which don't touch points) |
 
-## Workflow
+## How the modes fit together
 
-The app follows the order the work happens in, shown as steps along the top of
-the window. Each step can be revisited; later steps are never locked, they
-just say what they are missing.
+```
+ scans (PCD, E57, LAS/LAZ, PLY)
+        |
+   [ ALIGN ] -- transforms --> [ EDIT ] -- delete masks, splits --> [ INSPECT ]
+        |                         |                                     |
+   merged / converted       edited cloud export               viewing file (.pcdview)
+   cloud export                                                 measurements, screenshots
+```
 
-| Step | What the user does | Exists today? |
-|---|---|---|
-| 1. **Scans** | Create or open a project, drop scans (PCD, E57, LAS/LAZ, PLY). See them in their original positions. | Partly (PCD only, no project) |
-| 2. **Align** | Auto-align, Retry, check the quality report. If a scan won't go, align it by picking 3 matching points. Lock scans that are right. | Yes, except manual pick and lock |
-| 3. **Clean** | Dedup, noise, moving objects with live preview, plus a crop box and a manual "delete selection" brush. | Mostly; crop and manual delete are new |
-| 4. **Use** | Walk through, measure, cut sections, trace plan outlines, add notes and photos to points. | Walk-through only |
-| 5. **Export** | Merged cloud (format, spacing, region), sections as DXF/PNG, measurements as CSV, a PDF/HTML report. | Merged cloud only |
+* **Edits are stored per original scan**, as a "deleted points" mask and
+  split regions, not as a new point file. So re-aligning in Align mode keeps
+  the deletions, everything is undoable, and the project stays small.
+* **Selections are made in space, not on drawn points.** In Edit mode only
+  some points may be drawn, but a brush, lasso or box deletes *every*
+  full-resolution point inside it, so lowering the detail never leaves
+  half-deleted objects behind. The view shows how much is drawn
+  ("showing 18% of points").
+* **Automatic clean-up moves from Align to Edit**, next to the manual tools, so
+  all ways of removing points are in one place and show in the same preview.
+  Align keeps merge/convert, which then applies the Edit-mode deletions.
+* **Inspect uses a prepared viewing file.** Building it is one step ("Prepare
+  for inspection") that writes a level-of-detail octree of the edited,
+  full-resolution cloud to disk. Inspect then streams it, so it can show more
+  points than fit on the graphics card at full quality. The file is rebuilt
+  when the edits change, and Inspect says when it is out of date.
 
-Steps 3 to 5 work on the *aligned scans plus transforms*, not on a merged file.
-"Merge" becomes one kind of export, not the end of the program.
+## The modes in detail
+
+### 1. Align
+
+Today's features, kept as they are, plus:
+
+* Read E57, LAS/LAZ and PLY as input.
+* Manual 3-point alignment when auto fails (pick 3 matching points on two
+  scans, ICP refines), and "align this scan to that one only".
+* Lock a scan's transform once it has been checked.
+* The current left-panel options move into a settings panel on the right.
+
+### 2. Edit (preview and editing)
+
+Viewing:
+
+* Orbit mode with top / front / side / orthographic views, and the
+  walk-through as a mode of the same view (no separate window).
+* Colour by scan, intensity, RGB, height, or alignment error (the quality
+  heat map), to spot misalignment and bad areas.
+* Detail slider, eye-dome lighting, point size.
+
+Selecting (works in both orbit and walk-through unless marked):
+
+* **Click** a point; **brush**: a sphere under the cursor that selects as you
+  paint (the natural tool in walk-through).
+* **Grow to object**: click once and the connected cluster of points is
+  selected (a chair, a person, a cone). The fastest way to remove small
+  objects.
+* **Lasso / rectangle** (orbit): selects everything under the shape through
+  the whole depth, or with "front only" just the visible surface.
+* **Box** and **slab between two planes** (orbit), **height range**.
+* Add / subtract / invert selection, hide selection, isolate selection.
+
+Acting on a selection:
+
+* **Delete** (stored as a mask, undoable), **Restore** deleted points.
+* **Split**: draw a line in a top or side view, or place a plane, and cut the
+  scans into two parts. Each part becomes its own item in the project that can
+  be shown, hidden, exported or deleted (e.g. split a building into floors).
+* **Crop to selection / box**: keep only the region.
+* Automatic clean-up (dedup, noise, moving objects) with its live preview.
+
+### 3. Inspect (full view)
+
+* Full-quality orbit and walk-through from the prepared viewing file.
+* **Click-to-measure in 3D**: point to point, chained distances, height
+  difference, angle, and a point's coordinates. Snaps to the nearest real
+  point. Measurements are saved in the project, listed in the side panel, and
+  exportable as CSV.
+* Screenshots at a chosen resolution.
+* No point edits. A one-click "Edit here" switches to Edit mode at the same
+  view, so a problem found while inspecting is quick to fix.
 
 ## UI structure
 
 ```
 +---------------------------------------------------------------------------+
-| File  Edit  View  Help           [1 Scans][2 Align][3 Clean][4 Use][5 Export] |
+| File  Edit  View  Help              [ Align ]  [ Edit ]  [ Inspect ]      |
 +---------------+-------------------------------------------+---------------+
-| PROJECT       |                                           | INSPECTOR     |
-|  Scans (12)   |                                           | (settings for |
-|   [x] scan01  |            3D view                        |  the current  |
-|   [x] scan02  |   (orbit / top / front / side / walk)     |  step or the  |
-|  Sections (3) |                                           |  selected     |
-|  Measurements |                                           |  item)        |
-|  Notes (5)    |                                           |               |
-|  Exports      |  [tool bar: select, measure, section,     |               |
-|               |   crop, note, pick points]                |               |
+| PROJECT       |                                           | SETTINGS /    |
+|  Scans (12)   |                                           | TOOLS         |
+|   [x] scan01  |            3D view                        | (for the      |
+|   [x] scan02  |   (orbit / top / front / side / walk)     |  current mode |
+|  Parts (2)    |                                           |  or selected  |
+|  Measurements |  [mode tool bar: select, brush, lasso,    |  item)        |
+|  Exports      |   box, split, measure ...]                |               |
 +---------------+-------------------------------------------+---------------+
 | status / progress bar / time left / Cancel                                |
 +---------------------------------------------------------------------------+
 ```
 
-* **Left, Project tree.** Everything the project contains, each with a tick box
-  to show or hide it. Replaces today's file list.
-* **Centre, 3D view.** One view for everything. Standard views (top, front,
-  side, orbit) plus the walk-through as a mode of the same view instead of a
-  separate window. A small tool bar for the tools of the current step.
-* **Right, Inspector.** The settings of the current step (alignment options,
-  clean-up options, export options) or of the selected item (a section's
-  height, a measurement's value). Today's left-panel options move here.
-* **Top, step bar.** Doubles as guidance for new users: the next step is
-  highlighted, and a step with a problem (a scan that didn't align) shows a
-  warning mark.
-* **Undo / Redo** for everything that changes the project (lock, delete
-  points, move a note, change a transform).
+* **Left, Project tree.** Scans, split parts, measurements and exports, each
+  with a tick box to show or hide it. Same in every mode.
+* **Centre, 3D view.** One view for everything, orbit or walk-through. The tool
+  bar along its edge changes with the mode.
+* **Right, settings and tools.** Alignment options in Align, clean-up and
+  selection options in Edit, measurement list in Inspect.
+* **Mode tabs at the top.** Edit and Inspect show a hint until something is
+  loaded; Inspect offers "Prepare for inspection" when its viewing file is
+  missing or out of date.
+* **Undo / Redo** for everything that changes the project.
 
-The current layout stays as a fallback during the change, and the CLI keeps
-working throughout.
+The CLI keeps working throughout, for batch align, merge and convert.
 
 ## Project and file model
 
@@ -103,8 +166,10 @@ A project is a folder, so it is easy to copy, zip or put on a network drive:
 Office Building.pcdproj/
   project.json        scans, transforms, quality, clean-up settings,
                       sections, measurements, notes, export presets
+  edits/              per-scan delete masks and split regions (Edit mode)
   cache/              downsampled clouds, normals/features, preview LOD
                       (safe to delete; rebuilt on demand)
+  view/               prepared viewing file for Inspect (rebuildable)
   photos/             pictures attached to notes
   exports/            default place for anything exported
 ```
@@ -116,7 +181,7 @@ Rules:
   replaced file is detected and the user is asked to point to it. Option:
   "Copy scans into the project" for handing a self-contained project over.
 * **Edits are stored as instructions, not new point files.** A transform, a
-  crop box, a "deleted points" mask per scan, clean-up settings. The full
+  "deleted points" mask per scan, split regions, clean-up settings. The full
   cloud is only produced when exporting. This keeps projects small and every
   step reversible.
 * **The cache makes reopening fast.** Opening a 30-scan project should show the
@@ -131,34 +196,35 @@ Rules:
 
 ### Must-have for 1.0
 
-These are what make it a release and not a 0.9.
-
-| Feature | Why |
-|---|---|
-| Project file (above), autosave, recent projects | Without it nothing else is worth building. |
-| Read E57, LAS/LAZ, PLY as input (same fields kept as for PCD) | Users get scans in whatever their scanner software exports. Writers already exist. |
-| Manual 3-point alignment fallback | A 1.0 can't leave the user stuck when auto fails. Pick 3 matching points, then ICP refines. Also "align this scan to that one only". |
-| Lock / unlock a scan's transform | So Retry and new scans don't move scans the user already checked. |
-| New layout: project tree, single 3D view, inspector, step bar | Room for the new tools. |
-| Standard views: top, front, side, orthographic toggle | Needed for sections and plans, and for checking alignment. |
-| Measure: point-to-point distance, height difference, and a picked point's coordinates | The most common question asked of a scan. Snaps to the nearest real point. |
-| Crop box / clipping box | Hide everything outside a box to look inside rooms, and export only that region. |
-| Sections (slices): horizontal or vertical slab of set thickness, shown flat | The basis of floor plans and elevations. Export PNG at a chosen scale and DXF as points. |
-| Export the merged cloud from the project (with crop, clean-up, spacing) | Today's merge, moved into the Export step. |
-| Undo / redo | Expected once users can edit. |
-| Code signing (or a decision not to) | SmartScreen's "Run anyway" looks broken to new users. See open questions. |
+| Feature | Mode | Why |
+|---|---|---|
+| Project file, autosave, recent projects | all | Without it nothing else is worth building. |
+| Mode tabs and the new layout (project tree, one 3D view, settings panel) | all | The frame for the three modes. |
+| Read E57, LAS/LAZ, PLY as input | Align | Users get scans in whatever their scanner software exports. Writers already exist. |
+| Manual 3-point alignment fallback, lock a scan | Align | A 1.0 can't leave the user stuck when auto fails. |
+| Walk-through inside the main view, top/front/side/orthographic views | Edit, Inspect | Checking alignment and quality. |
+| Colour by alignment error | Edit | Shows where scans disagree without leaving the view. |
+| Click, brush and grow-to-object selection, delete, restore | Edit | Leon's core ask: remove noise and small objects in orbit or walk-through. |
+| Lasso, rectangle and box selection | Edit | Mass selecting and deleting. |
+| Split along a line or plane into parts | Edit | Leon's ask; also floors, wings, crop. |
+| Undo / redo | Edit | Expected once users can delete. |
+| Prepared viewing file with streaming full-quality view | Inspect | Full quality on building-sized scans. |
+| Click-to-measure in 3D (distance, height, coordinates), saved | Inspect | Leon's ask. |
+| Export the edited cloud (with spacing, format) | Align | Today's merge, now with the edits applied. |
+| Code signing (or a decision not to) | - | SmartScreen's "Run anyway" looks broken to new users. |
 
 ### Nice-to-have (1.0 if time allows, else 1.1)
 
 | Feature | Why |
 |---|---|
+| Measuring in Edit mode too (same tool, quick checks while editing) | Saves switching modes for a quick check. |
 | Notes: a pin on a point with text and optional photo, listed in the tree | Snag lists, site observations, "check this". |
 | Plan outline tracing on a section: click to draw lines/polylines, export DXF | Turns a slice into a floor plan a CAD user can use. |
 | Area and volume (polygon area on a section, box volume) | Quantities. |
 | Change detection between two visits of the same site | The moved-objects logic already exists; showing "what's new / gone" in colour is a short step and a strong selling point. |
-| Manual point delete (brush or lasso) | For things the automatic clean-up misses. |
 | Report export (HTML/PDF): scans, quality grade, heat map, measurements, sections, notes | Something to hand over or file. |
-| Eye-dome lighting and point-size controls | Makes scans much easier to read without colour. |
+| Sections (slices) shown flat, export PNG/DXF | The basis of floor plans and elevations. |
+| Viewer-only launch: open a viewing file read-only, for clients | Inspect mode is already read-only, so this is mostly packaging. |
 | Walk-on-floor mode (gravity + collision) in the walk-through | Feels like walking the building. |
 | Sample project in the installer and a first-run tour | Lets a new user see the workflow in 2 minutes. |
 
@@ -175,41 +241,37 @@ These are what make it a release and not a 0.9.
 
 ## Suggested release path
 
-1. **0.9: foundation.** Project file, input formats, new layout with the
-   current features moved into it, lock, undo. No new tools yet; everything
-   that works today must still work.
-2. **0.10: rescue and look.** Manual 3-point alignment, standard views, crop
-   box.
-3. **0.11: use.** Measure, sections with export, merged export from the
-   project.
+1. **0.9: foundation.** Project file, input formats, mode tabs and the new
+   layout with today's features moved into Align, walk-through inside the
+   main view. Everything that works today must still work.
+2. **0.10: Edit mode.** Selection tools, delete/restore, undo, split, auto
+   clean-up moved here, colour by alignment error.
+3. **0.11: Inspect mode.** Prepared viewing file and streaming, measuring.
+   Manual 3-point alignment in Align.
 4. **1.0.** Bug fixes from real scans, signed installer, README rewritten as a
    user guide, sample project. Nice-to-haves that are ready go in.
 
 Each step is a release Leon can try on real scans before the next starts.
-Parallel PRs have been clashing on `gui.py`; the layout change in 0.9 should
-split it into one module per panel/step so later features can be built side by
+Parallel PRs have been clashing on `gui.py`; the 0.9 layout change should split
+it into one module per mode and panel so later features can be built side by
 side.
 
 ## Open questions for Leon
 
-1. **Who uses it, and what do they hand over?** This decides the "Use" and
-   "Export" steps more than anything else. Typical answers and what they pull
-   in:
-   * *Just me, to get a clean merged cloud for other software* → keep 1.0
-     small: projects, formats, manual alignment, crop, export.
-   * *Surveyors / measured-building work* → sections, plan tracing, DXF,
-     measurements, coordinates, maybe georeferencing.
-   * *Construction / facilities* → notes with photos, change detection between
-     visits, report export.
-   * *Visualisation / clients* → walk-through polish, colour, mesh.
-2. **Project folder as proposed, or stay file-based** (open scans, export,
-   nothing saved)? Recommended: project folder.
-3. **Code signing.** A certificate costs roughly a few hundred dollars a year
-   (Azure Trusted Signing is cheaper). Worth it if people outside your own PC
-   will install it.
-4. **Is "1.0" for you only, or for other people?** If others, a user guide,
-   sample data and a first-run tour become must-haves.
-5. **Which is the most-wanted tool after alignment**: measuring, sections /
-   floor plans, notes, or change detection? That one goes first in 0.11.
+1. **Who uses it, and what do they hand over?** A clean cloud for other
+   software, measurements, floor plans, notes with photos, or a comparison
+   between visits? This decides what comes after 1.0.
+2. **Should the Inspect viewing file be viewable outside the app?** For
+   example a read-only viewer you can give a client, or a web viewer. If yes,
+   its format should be chosen with that in mind (an open format like COPC
+   LAZ, which other viewers read, rather than our own).
+3. **Is automatic clean-up moving from Align to Edit OK?** Recommended, so all
+   point removal is in one place.
+4. **Does a split create separate scans or just parts of the project?**
+   Recommended: parts that export as separate files, while the original scans
+   stay whole.
+5. **Code signing.** A certificate costs roughly a few hundred dollars a year
+   (Azure Trusted Signing is cheaper). Worth it if people other than you will
+   install it.
 6. **Scan sizes to design for.** How many scans and points in your biggest
-   site? It sets how hard the cache and level-of-detail work needs to be.
+   site? It sets how hard the streaming and level-of-detail work needs to be.
