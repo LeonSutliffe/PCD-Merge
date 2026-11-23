@@ -37,9 +37,11 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .cleanup import CleanupOptions
+from .exporters import FORMATS, file_filter, write_cloud
 from .merge import merge_clouds_with_stats
-from .pcd_io import PointCloud, read_pcd, write_pcd
+from .pcd_io import PointCloud, read_pcd
 from .registration import AlignResult, AlignSettings, align
+from .thinning import thin
 
 try:
     import pyqtgraph.opengl as gl
@@ -94,18 +96,25 @@ def _align_clouds(clouds, settings, progress):
     return align(xyz, settings, progress)
 
 
-def _merge_and_save(clouds, transforms, path, add_source, compressed, cleanup, progress):
+def _merge_and_save(clouds, transforms, path, add_source, compressed, spacing, cleanup,
+                    progress):
     progress("Applying transforms to full-resolution clouds", 0.1)
 
     def clean_progress(msg, frac):
-        progress(msg, 0.15 + 0.45 * frac)
+        progress(msg, 0.15 + 0.25 * frac)
 
     merged, partial, stats = merge_clouds_with_stats(
         clouds, transforms, add_source_field=add_source, cleanup=cleanup,
         progress=clean_progress)
-    progress(f"Writing {len(merged):,} points", 0.6)
-    write_pcd(path, merged, compressed=compressed)
     notes = stats.lines([c.name for c in clouds]) if stats is not None else []
+    if spacing:
+        progress(f"Thinning {len(merged):,} points to {spacing:g} spacing", 0.4)
+        before = len(merged)
+        merged = thin(merged, spacing)
+        notes.append(f"thinned to a minimum spacing of {spacing:g}: kept {len(merged):,} "
+                     f"of {before:,} points ({len(merged) / max(before, 1):.0%})")
+    progress(f"Writing {len(merged):,} points", 0.6)
+    notes += write_cloud(path, merged, compressed=compressed)
     return path, len(merged), partial, notes
 
 
@@ -227,9 +236,22 @@ class MainWindow(QMainWindow):
         lv.addWidget(box)
 
         self.cb_source = QCheckBox("Add a 'source' field (which file each point came from)")
-        self.cb_compress = QCheckBox("Write compressed PCD (binary_compressed)")
+        self.cb_compress = QCheckBox("Compress PCD output (binary_compressed)")
         lv.addWidget(self.cb_source)
         lv.addWidget(self.cb_compress)
+        self.spacing = QDoubleSpinBox()
+        self.spacing.setDecimals(3)
+        self.spacing.setRange(0.0, 10.0)
+        self.spacing.setSingleStep(0.01)
+        self.spacing.setSpecialValueText("Full resolution")
+        self.spacing.setToolTip(
+            "Thin the merged cloud so no two points are closer than this distance "
+            "(in the scans' units, e.g. 0.02 = 2 cm). Original points are kept, not "
+            "averaged, so intensity and other fields stay exact. Leave at Full "
+            "resolution to save every point.")
+        spacing_row = QFormLayout()
+        spacing_row.addRow("Min. point spacing:", self.spacing)
+        lv.addLayout(spacing_row)
 
         self.b_save_tf = QPushButton("Save transforms…")
         self.b_save_tf.clicked.connect(self._save_transforms)
@@ -500,14 +522,22 @@ class MainWindow(QMainWindow):
             if ans != QMessageBox.Yes:
                 return
         base = os.path.dirname(self.clouds[0].path or "")
-        path, _ = QFileDialog.getSaveFileName(self, "Save merged cloud",
-                                              os.path.join(base, "merged.pcd"),
-                                              "Point cloud (*.pcd)")
+        ext = getattr(self, "_save_ext", ".pcd")
+        filters = file_filter()
+        chosen = next(f for f in filters.split(";;") if f.endswith(f"(*{ext})"))
+        path, selected = QFileDialog.getSaveFileName(self, "Save merged cloud",
+                                                     os.path.join(base, "merged" + ext),
+                                                     filters, chosen)
         if not path:
             return
-        if not path.lower().endswith(".pcd"):
-            path += ".pcd"
-        compressed = self.cb_compress.isChecked()
+        typed = os.path.splitext(path)[1].lower()
+        if typed in FORMATS:
+            ext = typed
+        else:  # no (known) extension typed: use the format picked in the dialog
+            ext = next((e for e in FORMATS if selected.endswith(f"(*{e})")), ".pcd")
+            path += ext
+        self._save_ext = ext
+        compressed = self.cb_compress.isChecked() and ext == ".pcd"
         if compressed:
             try:
                 import lzf  # noqa: F401
@@ -517,7 +547,8 @@ class MainWindow(QMainWindow):
                 compressed = False
         self._run(_merge_and_save,
                   (list(self.clouds), list(self.result.transforms), path,
-                   self.cb_source.isChecked(), compressed, self._cleanup_options()),
+                   self.cb_source.isChecked(), compressed, self.spacing.value() or None,
+                   self._cleanup_options()),
                   self._merged, "Merging…")
 
     def _cleanup_options(self) -> CleanupOptions:
@@ -529,11 +560,11 @@ class MainWindow(QMainWindow):
     def _merged(self, payload):
         path, n, partial, notes = payload
         msg = f"Saved {n:,} points to {path}"
-        if notes:
-            msg += "\n\n" + "\n".join(notes)
         if partial:
             msg += ("\n\nThese fields were missing from some files and were filled with 0: "
                     + ", ".join(partial))
+        for note in notes:
+            msg += "\n\n" + note[0].upper() + note[1:] + "."
         self._set_status(f"Saved {n:,} points to {os.path.basename(path)}.")
         QMessageBox.information(self, "PCD Merge", msg)
 
