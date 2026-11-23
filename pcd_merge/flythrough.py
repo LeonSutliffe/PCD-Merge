@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -457,7 +458,7 @@ class FlyThroughWindow(QWidget):
         self.size = QSlider(Qt.Horizontal)
         self.size.setRange(5, 30)
         self.size.setValue(16)
-        self.size.setFixedWidth(110)
+        self.size.setFixedWidth(80)
         self.size.valueChanged.connect(self._set_size)
         top.addWidget(self.size)
         top.addSpacing(12)
@@ -484,6 +485,9 @@ class FlyThroughWindow(QWidget):
         self.jump = QComboBox()
         self.jump.setToolTip("Jump to where a scan was taken (keys 1-9 do the same).")
         self.jump.addItem("Jump to scan position…")
+        # long scan names must not widen the window
+        self.jump.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.jump.setMinimumContentsLength(14)
         for i, (name, _) in enumerate(scene.scan_positions):
             self.jump.addItem(f"{i + 1}: {name}" if i < 9 else name)
         self.jump.setEnabled(bool(scene.scan_positions))
@@ -509,10 +513,16 @@ class FlyThroughWindow(QWidget):
         bottom = QHBoxLayout()
         self.help = QLabel()
         self.help.setStyleSheet("color: #888;")
-        bottom.addWidget(self.help, 1)
         self.info = QLabel()
         self.info.setStyleSheet("color: #888;")
-        bottom.addWidget(self.info)
+        # These texts change while moving (and get longer when the mouse is
+        # captured); they must never widen the window, so they may be cut off.
+        for lab in (self.help, self.info):
+            lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            lab.setMinimumWidth(0)
+        self.info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        bottom.addWidget(self.help, 3)
+        bottom.addWidget(self.info, 2)
         lay.addLayout(bottom)
 
         self.speed.setValue(self.view.speed)
@@ -541,6 +551,8 @@ class FlyThroughWindow(QWidget):
         if view._moving and view._fps:
             txt += f"   {view._fps:.0f} fps"
         self.info.setText(txt)
+        self.info.setToolTip(txt)
+        self.help.setToolTip(self.help.text())
 
     def _recolour(self, mode):
         QApplication.setOverrideCursor(Qt.WaitCursor)

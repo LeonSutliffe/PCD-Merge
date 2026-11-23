@@ -251,6 +251,75 @@ class CutTool(Tool):
             painter.drawLine(self.points[0], self.points[1])
 
 
+class MeasureTool(Tool):
+    """Click two points for a distance (or one, for its coordinates). The
+    points snap to the nearest drawn point under the mouse."""
+
+    name = "measure"
+    cursor = Qt.CrossCursor
+
+    def __init__(self, view, panel):
+        super().__init__(view, panel)
+        self.first = None  # the first point of a distance, project frame
+        self._mouse = None
+
+    @property
+    def hint(self):
+        if self.panel.measure_kind() == "point":
+            return "Click a point to read its coordinates   Alt-drag: rotate   Esc: stop"
+        return ("Click the first point, then the second, to measure the distance   "
+                "Alt-drag: rotate   Esc: start again")
+
+    def press(self, ev):
+        if not self.view.measurements_shown():
+            self.panel.measure_status("Measurements are made on the aligned scans: choose "
+                                      "Show: Aligned above the view.")
+            return True
+        hit = self.view.pick(ev.position())
+        if hit is None:
+            self.panel.measure_status("No point there: click on the scan itself.")
+            return True
+        if self.panel.measure_kind() == "point":
+            self.panel.add_measurement("point", [hit])
+        elif self.first is None:
+            self.first = hit
+            self.view.set_pending_point(hit)
+            self.panel.measure_status("Now click the second point.")
+        else:
+            a, self.first = self.first, None
+            self.view.set_pending_point(None)
+            self.panel.add_measurement("distance", [a, hit])
+        return True
+
+    def move(self, ev):
+        self._mouse = ev.position()
+        return bool(ev.buttons() & Qt.LeftButton)
+
+    def release(self, ev):
+        return True
+
+    def leave(self):
+        self._mouse = None
+
+    def cancel(self):
+        self.first = None
+        self._mouse = None
+        self.view.set_pending_point(None)
+
+    def paint(self, painter):
+        if self.first is None or self._mouse is None:
+            return
+        mvp = self.view.camera_mvp()
+        c = mvp @ np.r_[self.first, 1.0]
+        if c[3] <= 1e-9:
+            return
+        w, h = self.view.view.width(), self.view.view.height()
+        x = (c[0] / c[3] + 1) / 2 * w
+        y = (1 - c[1] / c[3]) / 2 * h
+        painter.setPen(QPen(QColor(90, 220, 255), 1.5, Qt.DashLine))
+        painter.drawLine(QPointF(x, y), self._mouse)
+
+
 def cut_plane(a_ndc, b_ndc, mvp):
     """The plane through a line drawn on the screen and the view direction,
     as a :class:`~pcd_merge.edits.HalfSpace` (None if it is degenerate)."""

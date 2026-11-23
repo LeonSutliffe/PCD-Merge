@@ -98,13 +98,14 @@ The window has three parts and a row of mode tabs at the top right:
   missing one to point to where it is now), and the **merged clouds** made
   from the project. After a merge the result is listed there and shown in the
   view instead of the scans; tick and untick scans and merged clouds to
-  compare them. *Parts* and *Measurements* fill in with Edit (0.10) and Inspect
-  (0.11).
+  compare them. **Parts** are made by splitting in Edit, and **Measurements**
+  with the Measure button (tick to show, double-click to rename, right-click to
+  delete).
 * **Middle, the 3D view:** orbit, top / front / side, an orthographic option,
   and **Walk through** (first person) inside the same view.
 * **Right, the settings of the current mode.** **Align** has everything below.
-  **Edit** cleans the scans up and splits them (see *Edit mode*). **Inspect** says what is
-  coming; the view works in it already.
+  **Edit** cleans the scans up and splits them (see *Edit mode*). **Inspect** is
+  for looking and measuring (see *Measuring*).
 
 **Edit mode.** Choose a tool and select points in the view: **Brush** (click
 or drag; the size is in metres), **Rectangle** and **Lasso** (everything inside
@@ -170,6 +171,20 @@ e.g. `0.02` for 2 cm). The merged cloud is then thinned so no two points are
 closer than that. Original points are kept, not averaged, so intensity and the
 other fields stay exactly as measured. The default, *Full resolution*, saves
 every point.
+
+### Measuring
+
+Press **Measure** above the 3D view (or M), in any mode, and click two points
+for the distance between them, or one point for its coordinates. Clicks snap
+to the nearest point drawn under the mouse; Esc starts again. A distance also
+gives the horizontal distance, the height difference (second point minus
+first) and the slope. Measurements are drawn in the view with their value,
+saved in the project, and listed on the left under *Measurements*.
+
+**Inspect** mode opens with measuring on. Its panel chooses *Distance* or
+*Point*, lists the measurements with their details, deletes them, exports them
+all as a CSV spreadsheet, and saves a **screenshot** of the view, as shown or
+two or four times larger for printing.
 
 ### Walk-through (first person)
 
@@ -333,7 +348,7 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned (see `docs/plan-1.0.md`): Inspect mode with a full-quality COPC viewing file and measuring, and a
+* Planned (see `docs/plan-1.0.md`): a full-quality COPC viewing file for Inspect, and a
   manual 3-point alignment fallback (0.11).
 
 ## Large scans

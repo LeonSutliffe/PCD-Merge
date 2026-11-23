@@ -67,6 +67,27 @@ def pack_rgb(r, g, b) -> np.ndarray:
     return v.astype(np.uint32).view(np.float32)
 
 
+def unpack_rgb(packed: np.ndarray) -> np.ndarray:
+    """PCL packed colour (float32 or uint32 bit pattern) -> (N, 3) uint8."""
+    v = np.ascontiguousarray(packed)
+    v = v.view(np.uint32) if v.dtype.itemsize == 4 else v.astype(np.uint32)
+    return np.stack([(v >> 16) & 255, (v >> 8) & 255, v & 255], axis=1).astype(np.uint8)
+
+
+def point_attrs(data: np.ndarray) -> dict:
+    """What the view can colour by, besides position: ``intensity`` (float32)
+    and ``rgb`` ((N, 3) uint8), for whichever of them the points have."""
+    out = {}
+    names = data.dtype.names or ()
+    if "intensity" in names and data.dtype["intensity"].ndim == 0:
+        out["intensity"] = np.asarray(data["intensity"], dtype=np.float32)
+    for name in ("rgb", "rgba"):
+        if name in names and data.dtype[name].ndim == 0:
+            out["rgb"] = unpack_rgb(data[name])
+            break
+    return out
+
+
 def _to_u8(values: np.ndarray, sixteen_bit: bool) -> np.ndarray:
     v = np.asarray(values)
     if sixteen_bit:
@@ -605,23 +626,37 @@ def read_clouds(path: str, progress: FracFn = None) -> list[PointCloud]:
     return out
 
 
-def sample_points(source: ScanSource, n: int, seed: int = 0) -> np.ndarray:
+def sample_points(source: ScanSource, n: int, seed: int = 0, attrs: bool = False):
     """A random subset of up to ``n`` finite points as (k, 3) float64, in random
-    order, read in one streaming pass (the scan is never held in memory)."""
+    order, read in one streaming pass (the scan is never held in memory).
+
+    With ``attrs``, returns ``(xyz, attrs)`` where ``attrs`` holds the same
+    points' intensity and colour (see :func:`point_attrs`)."""
     rng = np.random.default_rng(seed)
     total = max(source.count, 1)
     keep_frac = min(1.0, n / total)
-    parts = []
+    parts, extra = [], []
     for chunk in source.chunks():
         if keep_frac < 1.0:
             chunk = chunk[rng.random(len(chunk)) < keep_frac * 1.02]
         xyz = np.empty((len(chunk), 3), dtype=np.float64)
         xyz[:, 0], xyz[:, 1], xyz[:, 2] = chunk["x"], chunk["y"], chunk["z"]
-        parts.append(xyz[np.isfinite(xyz).all(axis=1)])
+        ok = np.isfinite(xyz).all(axis=1)
+        parts.append(xyz[ok])
+        if attrs:
+            extra.append(point_attrs(chunk[ok]))
     xyz = np.concatenate(parts) if parts else np.zeros((0, 3))
+    att = {k: np.concatenate([e[k] for e in extra]) for k in (extra[0] if extra else {})}
+    pick = None
     if len(xyz) > n:
-        xyz = xyz[rng.choice(len(xyz), n, replace=False)]
-    return xyz[rng.permutation(len(xyz))]
+        pick = rng.choice(len(xyz), n, replace=False)
+        xyz = xyz[pick]
+    order = rng.permutation(len(xyz))
+    xyz = xyz[order]
+    if not attrs:
+        return xyz
+    att = {k: (v[pick] if pick is not None else v)[order] for k, v in att.items()}
+    return xyz, att
 
 
 def find_scan_files(paths: list[str], exts=None) -> list[str]:
