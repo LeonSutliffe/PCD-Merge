@@ -130,8 +130,28 @@ Options: `--voxel 0.3`, `--min-spacing 0.02` (thin the output), `--seed 1` (repe
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The overlap numbers and the preview are there to
   catch this.
+* Planned: GPU acceleration for very large scans (NVIDIA), and a first-person
+  walk-through view for building-sized scans.
 * Planned: a manual fallback where you pick a few matching points in two clouds
   to give the alignment a start.
+
+## Large scans
+
+Loading, aligning and merging run in the background. The progress bar shows
+percent done, elapsed time and an estimate of the time left, and **Cancel**
+stops the current step without losing anything already loaded.
+
+Measured on three synthetic scans of about 24 million points each (71 million
+in total, 4-core machine), from loading to a saved merged file:
+
+| | Time | Peak memory |
+|---|---|---|
+| 0.3.0 | 55 to 60 s | 4.9 GB |
+| 0.6.0 | 30 to 33 s | 3.8 GB |
+
+To time your own machine: `python benchmarks/bench_large.py --points 20000000`.
+
+GPU acceleration is not used: the Windows build of Open3D is CPU-only.
 
 ## Releasing a new version
 
