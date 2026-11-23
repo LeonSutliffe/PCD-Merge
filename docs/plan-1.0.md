@@ -300,18 +300,33 @@ the graphics card. So for 1.0:
 * **Alignment is fine as it is**: it already works on downsampled copies.
 * A synthetic 1-billion-point benchmark joins the CI benchmarks.
 
-## Open questions for Leon
+## Users (Leon, 2026-11-23)
 
-1. **Who uses it, and what do they hand over?** Only you, processing your own
-   scans, or other people too (architects, surveyors, building managers,
-   clients)? And what is the end product: the cloud itself for other
-   software, measurements, floor plans, or a walk-through for a client? This
-   decides what comes after 1.0.
-2. **Code signing.** Free route: SignPath Foundation signs open-source
-   projects at no cost, from GitHub Actions. It needs the repository public
-   with an open-source licence (there is no LICENSE file yet). Cheapest paid
-   routes: Certum open-source certificate or Azure Trusted Signing, both low
-   cost per year.
+For now: Leon and other hobbyists. So 1.0 stays focused on the three modes;
+survey deliverables (DXF plans, reports, georeferencing) stay nice-to-have or
+later. A short user guide and a sample project matter, because hobbyists
+install it without help.
+
+## Code signing plan
+
+Free route: SignPath Foundation (no rule against AI-written code; the same
+review and approval rules apply to every change). Apply around 1.0, once the
+project has some public history. Needed before applying:
+
+* Repository public, with an OSI licence (e.g. MIT) in `LICENSE`; all
+  bundled libraries already have compatible licences.
+* A "Code signing policy" section in the README and on the releases page, with
+  the SignPath credit line, the team roles (Leon as author, reviewer and
+  approver) and a privacy note (the app only contacts GitHub to check for
+  updates).
+* MFA on GitHub (and on SignPath).
+* An **Uninstall** option (Start-menu entry or Settings > Apps), because the
+  app installs itself and makes shortcuts.
+* Release workflow sends the built exe to SignPath and waits for Leon's
+  approval of each signing request.
+
+Risk: SignPath checks "reputation" at its own discretion, so a young hobby
+project may be asked to wait.
 
 ## Technical risk to check first
 
