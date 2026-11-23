@@ -219,6 +219,8 @@ class MainWindow(QMainWindow):
     def _mode_changed(self, i):
         self.right.setCurrentIndex(i)
         self.inspect_panel.activate(False)
+        if i != 0:
+            self.align_panel.manual.stop_picking()
         self.edit_panel.activate(i == 1)
         if i == 2:
             self.inspect_panel.activate(True)
@@ -287,6 +289,7 @@ class MainWindow(QMainWindow):
         elif what == "project":
             self.view.leave_walk()
             self.align_panel.load_settings()
+            self.align_panel.manual.scans_changed()
             self.align_panel.cleanup_changed()
             self.edit_panel.clear_selection()
             self.edit_panel._height_set = False

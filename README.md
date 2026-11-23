@@ -157,6 +157,19 @@ cloud merged earlier, to add new scans to it.
 If some clouds could not be aligned, merging asks whether to leave them out or
 merge them in their original position.
 
+**Align by hand.** When Align and Retry can't place a scan, use *Align by
+hand* in the Align panel. Choose the scan to **Move** and a scan **Onto**
+which it goes (one that is already right), press **Pick points**, and click
+the same spot on each in turn: a corner, a pole, a door frame. The fixed
+scan's picks are marked in yellow and the moving scan's in magenta, and only
+the two scans are drawn while you pick. Three pairs are needed, or two with
+*Scans are level* ticked (only the heading is found, for levelled tripod
+scans). The panel says how well the pairs agree and which one fits worst,
+which catches a mis-click. **Apply** places the scan; *Tighten automatically
+afterwards* then fine-tunes it on the scans themselves, so the clicks only
+need to be roughly right. The quality report and heat map update as after
+Align.
+
 **Adding new scans later.** Press **Add new scans to an existing merged
 cloud…** and pick a merged cloud you saved earlier, then add the new scans (or
 the whole site folder again) and press **Align**. The merged cloud stays
@@ -348,8 +361,7 @@ alignment.
 * Very repetitive or symmetric places (long identical corridors, empty fields)
   can align to the wrong spot. The quality report and the error heatmap are there
   to catch this.
-* Planned (see `docs/plan-1.0.md`): a full-quality COPC viewing file for Inspect, and a
-  manual 3-point alignment fallback (0.11).
+* Planned (see `docs/plan-1.0.md`): a full-quality COPC viewing file for Inspect (0.11).
 
 ## Large scans
 

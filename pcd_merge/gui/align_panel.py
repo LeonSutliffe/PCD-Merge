@@ -173,6 +173,11 @@ class AlignPanel(QWidget):
         self.b_base.clicked.connect(self._base_dialog)
         lv.addWidget(self.b_base)
 
+        from .manual_align import ManualAlignBox
+
+        self.manual = ManualAlignBox(self)
+        lv.addWidget(self.manual)
+
         # ---- clean-up: built here (the merge uses it) but shown in Edit mode
         box = self.cleanup_box = QGroupBox("Automatic clean-up (applied when saving)")
         cl = QVBoxLayout(box)
@@ -313,10 +318,12 @@ class AlignPanel(QWidget):
         self.b_merge.setEnabled(not busy and aligned)
         self.b_save_tf.setEnabled(not busy and aligned)
         self.b_base.setEnabled(not busy)
+        self.manual.update_buttons(busy)
 
     def scans_changed(self):
         """Scans added or removed: earlier results no longer apply."""
         self._reset_retries()
+        self.manual.scans_changed()
         self.show_result()
         self.cleanup_changed()
 

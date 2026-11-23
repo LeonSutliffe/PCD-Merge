@@ -6,8 +6,8 @@ mode tabs (PR #17). 0.10 built: selection, delete/restore, undo (PR #20),
 split into parts, clean-up and colour by height in Edit (PR #21). 0.11 started:
 colour by intensity or RGB, and measuring (distance, height difference, slope,
 coordinates) from a Measure button in every mode, with the Inspect panel, CSV
-export and screenshots (PR #23). Still to do in 0.11: manual 3-point alignment
-and the COPC viewing file.
+export and screenshots (PR #23); align by hand from picked point pairs, with
+automatic tightening (ICP). Still to do in 0.11: the COPC viewing file.
 
 ## Where we are (0.8.0)
 

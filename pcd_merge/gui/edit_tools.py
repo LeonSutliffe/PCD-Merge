@@ -320,6 +320,35 @@ class MeasureTool(Tool):
         painter.drawLine(QPointF(x, y), self._mouse)
 
 
+class PairTool(Tool):
+    """Align by hand: click the same spot on the fixed scan, then on the scan
+    to move, and so on. Each click snaps to the nearest drawn point of the
+    scan the panel expects next."""
+
+    name = "pairs"
+    cursor = Qt.CrossCursor
+
+    @property
+    def hint(self):
+        return self.panel.pick_hint() + "   Alt-drag: rotate   Esc: stop"
+
+    def press(self, ev):
+        i = self.panel.pick_scan()
+        hit = self.view.pick(ev.position(), scans=[i], exports=False)
+        if hit is None:
+            self.panel.pick_missed()
+        else:
+            self.panel.add_pick(hit)
+        self.view.hint.setText(self.hint)
+        return True
+
+    def move(self, ev):
+        return bool(ev.buttons() & Qt.LeftButton)
+
+    def cancel(self):
+        self.panel.stop_picking()
+
+
 def cut_plane(a_ndc, b_ndc, mvp):
     """The plane through a line drawn on the screen and the view direction,
     as a :class:`~pcd_merge.edits.HalfSpace` (None if it is degenerate)."""

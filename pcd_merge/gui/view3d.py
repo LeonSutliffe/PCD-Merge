@@ -39,6 +39,7 @@ class View3D(QWidget):
     walk_fallback = Signal(str)  # the walk-through opened in its own window (the error)
     selection_changed = Signal()
     measure_toggled = Signal(bool)  # the Measure button
+    tool_changed = Signal()
 
     NAV_HINT = "Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom"
 
@@ -60,6 +61,8 @@ class View3D(QWidget):
         self._meas_items = []  # what draws the measurements
         self._pending = None  # first point of a distance being measured (project frame)
         self._size_scale = 1  # point sizes are multiplied by this (large screenshots)
+        self.only = None  # set of scan indices: draw only these (align by hand)
+        self._markers = []  # [(point, rgba, label)] in the project frame (align by hand)
         self._redraw_soon = QTimer(self)
         self._redraw_soon.setSingleShot(True)
         self._redraw_soon.setInterval(40)
@@ -257,7 +260,7 @@ class View3D(QWidget):
         attr = {3: "intensity", 4: "rgb"}.get(mode)
         irange = self._intensity_range() if attr == "intensity" else None
         for i, (xyz, scan) in enumerate(zip(previews, doc.scans)):
-            if not scan.entry.visible or not len(xyz):
+            if not scan.entry.visible or not len(xyz) or not self._drawn(i):
                 continue
             proj, hidden = self.project_points(i)
             pts = proj if aligned else xyz
@@ -292,7 +295,9 @@ class View3D(QWidget):
                 if isinstance(color, np.ndarray) and color.ndim == 2:
                     color = color[keep]
             self._add_points(pts, color, size)
-        for xyz, attrs in zip(doc.visible_exports(), doc.visible_export_attrs()):
+        exports = zip(doc.visible_exports(), doc.visible_export_attrs()) if self.only is None \
+            else ()
+        for xyz, attrs in exports:
             vals = (attrs or {}).get(attr) if attr else None
             if height:
                 lo, span = height
@@ -302,6 +307,19 @@ class View3D(QWidget):
             else:
                 color = (*EXPORT_COLOUR, 1.0)
             self._add_points((xyz - origin).astype(np.float32), color, size)
+        self.draw_measurements()
+
+    def _drawn(self, i: int) -> bool:
+        return self.only is None or i in self.only
+
+    def set_only(self, scans) -> None:
+        """Draw only these scans (None: all the ticked ones)."""
+        self.only = None if scans is None else set(scans)
+        self.redraw()
+
+    def set_markers(self, markers) -> None:
+        """Numbered points to show (align by hand): [(point, rgba, label)]."""
+        self._markers = list(markers)
         self.draw_measurements()
 
     def measurements_shown(self) -> bool:
@@ -334,6 +352,12 @@ class View3D(QWidget):
             label = gl.GLTextItem(pos=pts.mean(axis=0), text="  " + text,
                                   color=QColor(200, 240, 255), font=_label_font())
             self._on_top(label)
+        for pt, rgba, text in self._markers:
+            p = (np.asarray(pt, float) - origin).astype(np.float32)[None]
+            self._on_top(gl.GLScatterPlotItem(pos=p, color=rgba, size=11 * self._size_scale,
+                                              pxMode=True))
+            self._on_top(gl.GLTextItem(pos=p[0], text=f" {text}", font=_label_font(),
+                                       color=QColor.fromRgbF(*rgba)))
         if self._pending is not None:
             p = (np.asarray(self._pending, float) - origin).astype(np.float32)[None]
             self._on_top(gl.GLScatterPlotItem(pos=p, color=PENDING_COLOUR, size=11,
@@ -458,6 +482,7 @@ class View3D(QWidget):
             self.b_measure.blockSignals(True)
             self.b_measure.setChecked(measuring)
             self.b_measure.blockSignals(False)
+        self.tool_changed.emit()
         if self.view is not None:
             self.draw_measurements()
             self.view.setCursor(tool.cursor if tool is not None else Qt.ArrowCursor)
@@ -512,8 +537,9 @@ class View3D(QWidget):
         return np.array([2.0 * pos.x() / max(1, v.width()) - 1.0,
                          1.0 - 2.0 * pos.y() / max(1, v.height())])
 
-    def pick(self, pos, radius_px: float = 7.0):
-        """The nearest drawn point under the mouse (project frame), or None."""
+    def pick(self, pos, radius_px: float = 7.0, scans=None, exports: bool = True):
+        """The nearest drawn point under the mouse (project frame), or None.
+        ``scans``: only look at these scans' points."""
         if self.view is None:
             return None
         mvp = self.camera_mvp()
@@ -522,13 +548,15 @@ class View3D(QWidget):
         best, best_w = None, np.inf
         clouds = []
         for i, scan in enumerate(self.doc.scans):
-            if not scan.entry.visible:
+            if not scan.entry.visible or not self._drawn(i) or (scans is not None
+                                                                 and i not in scans):
                 continue
             proj, hidden = self.project_points(i)
             if not len(proj):
                 continue
             clouds.append(proj if self.edit_mode and self.show_deleted else proj[~hidden])
-        clouds += [x for x in self.doc.visible_exports() if len(x)]  # already in the frame
+        if exports and scans is None and self.only is None:
+            clouds += [x for x in self.doc.visible_exports() if len(x)]  # already in the frame
         for pts in clouds:
             clip = pts @ mvp[:3, :3].T + mvp[:3, 3]
             w = pts @ mvp[3, :3] + mvp[3, 3]
