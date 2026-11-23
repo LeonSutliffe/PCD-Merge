@@ -90,7 +90,7 @@ class View3D(QWidget):
         self.pt_size = QSlider(Qt.Horizontal)
         self.pt_size.setRange(1, 8)
         self.pt_size.setValue(2)
-        self.pt_size.setFixedWidth(100)
+        self.pt_size.setFixedWidth(70)
         self.pt_size.valueChanged.connect(self.redraw)
         top.addWidget(self.pt_size)
         b_fit = QPushButton("Reset view")
