@@ -101,3 +101,111 @@ def test_camera_moves_level_and_looks_forward():
 
 def test_default_speed(scene):
     assert default_speed(scene) == 2.0
+
+
+# --------------------------------------------------------------------------
+# Editing and measuring in the walk-through
+
+
+def test_pick_finds_the_nearest_point_under_the_mouse(scene):
+    from pcd_merge.flyscene import pick
+
+    cam = start_camera(scene)
+    w, h = 800, 600
+    mvp = cam.projection_matrix(w / h) @ cam.view_matrix()
+    pos = scene.vertices["pos"].astype(np.float64)
+    clip = pos @ mvp[:3, :3].T + mvp[:3, 3]
+    ww = pos @ mvp[3, :3] + mvp[3, 3]
+    ndc = clip[:, :2] / ww[:, None]
+    seen = np.flatnonzero((ww > 0.5) & np.all(np.abs(ndc) < 0.8, axis=1))
+    target = seen[len(seen) // 2]
+    i = pick(scene, mvp, ndc[target], (w, h), radius_px=3.0)
+    assert i is not None
+    # the nearest of the points within 3 px of the click
+    near = np.flatnonzero((ww > 1e-9) & (np.linalg.norm(
+        (ndc - ndc[target]) * [w / 2, h / 2], axis=1) <= 3.0))
+    assert ww[i] == pytest.approx(ww[near].min())
+    # hidden points are never picked
+    skip = np.zeros(len(scene), bool)
+    skip[near] = True
+    j = pick(scene, mvp, ndc[target], (w, h), radius_px=3.0, skip=skip)
+    assert j is None or j not in near
+    # nothing there (looking at the sky)
+    assert pick(scene, mvp, [0.0, 5.0], (w, h)) is None
+
+
+def test_scene_edits_hide_deleted_points_and_hidden_parts(clouds):
+    from pcd_merge.edits import Edit, EditStack, HalfSpace, Sphere
+    from pcd_merge.flyscene import SceneEdits, region_mask, world
+
+    sc = build_scene(clouds, POSES)
+    sc.scan_keys = ["a", "b"]
+    xyz = world(sc)
+    centre = xyz[len(xyz) // 3]
+    ball = Sphere(centre, 1.5)
+    inside = np.linalg.norm(xyz - centre, axis=1) <= 1.5
+    assert np.array_equal(region_mask(sc, ball), inside)  # (chunk culling loses nothing)
+
+    st = EditStack()
+    st.add(Edit("delete", ball))
+    ed = SceneEdits(sc)
+    ed.update(st)
+    assert np.array_equal(ed.deleted, inside)
+    ed.apply()
+    assert np.array_equal(sc.hidden, inside)
+    chunk = np.repeat(np.arange(len(sc.chunk_count)), sc.chunk_count)
+    assert np.array_equal(sc.chunk_live, np.bincount(chunk[~inside], minlength=len(sc.chunk_count)))
+    ed.apply(show_deleted=True)  # shown (dark red) to be restored
+    assert sc.hidden is None
+
+    # an edit for one scan only; a restore; undo
+    only_b = Edit("delete", Sphere(centre, 3.0), scans=["b"])
+    st.add(only_b)
+    ed.update(st)
+    in3 = np.linalg.norm(xyz - centre, axis=1) <= 3.0
+    assert np.array_equal(ed.deleted, inside | (in3 & (sc.scan_id == 1)))
+    st.add(Edit("restore", Sphere(centre, 0.5)))
+    ed.update(st)
+    assert not ed.deleted[np.linalg.norm(xyz - centre, axis=1) <= 0.5].any()
+    st.undo()
+    st.undo()
+    ed.update(st)
+    assert np.array_equal(ed.deleted, inside)
+    assert len(ed._masks) == 3  # each region tested once
+
+    # parts: points outside every visible part are hidden
+    z = float(np.median(xyz[:, 2]))
+    upper, lower = st.split(HalfSpace([0, 0, 1], z), ("up", "down"))
+    lower.visible = False
+    ed.update(st)
+    assert np.array_equal(ed.outside_parts, xyz[:, 2] < z)
+    # merged files (no scan key) are never edited
+    sc.scan_keys = ["a", None]
+    ed.update(st)
+    assert not ed.deleted[sc.scan_id == 1].any() and not ed.outside_parts[sc.scan_id == 1].any()
+
+
+def test_hidden_chunks_are_not_drawn(clouds):
+    sc = build_scene(clouds, POSES)
+    cam = FlyCamera(pos=np.array([0.0, -40.0, 10.0]))
+    cam.look_at([0, 0, 0])
+    mvp = cam.projection_matrix(4 / 3) @ cam.view_matrix()
+    before = plan_frame(sc, cam.pos, mvp, 500, 10_000_000).points
+    sc.chunk_live = np.zeros(len(sc.chunk_count), np.int64)
+    sc.chunk_live[::2] = 1
+    after = plan_frame(sc, cam.pos, mvp, 500, 10_000_000).points
+    assert 0 < after < before
+
+
+def test_near_points_and_chunk_ranges(scene):
+    from pcd_merge.flyscene import chunk_ranges, near_points, world
+
+    idx = chunk_ranges(scene, [0, 2])
+    want = np.r_[np.arange(scene.chunk_start[0], scene.chunk_start[0] + scene.chunk_count[0]),
+                 np.arange(scene.chunk_start[2], scene.chunk_start[2] + scene.chunk_count[2])]
+    assert np.array_equal(idx, want)
+    xyz = world(scene)
+    c = xyz[100]
+    got = near_points(scene, c, 2.0)
+    want = xyz[np.all(np.abs(xyz - c) <= 2.0, axis=1)]
+    assert len(got) == len(want)

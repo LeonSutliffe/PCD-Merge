@@ -626,8 +626,12 @@ def test_walk_through_is_kept_and_panels_can_be_hidden(window, qtbot, scans):
         cam = win.view._walk.view.cam
         assert np.allclose(cam.pos, [1, 2, 3]) and cam.yaw == pytest.approx(45.0)
         win.view.leave_walk()
-        # a change to what is shown builds it again
+        # edits don't need a new scene (they show at once); a new project does
         win.doc.edit_version += 1
+        win.walk_through()
+        assert win.view.walking and len(built) == 1
+        win.view.leave_walk()
+        win.forget_walk()
         win.walk_through()
         _wait(qtbot, win)
         assert len(built) == 2
@@ -636,7 +640,7 @@ def test_walk_through_is_kept_and_panels_can_be_hidden(window, qtbot, scans):
 
     # cancelling the preparation puts the button back
     win.view.leave_walk()
-    win.doc.edit_version += 1
+    win.forget_walk()
     win.walk_through()
     win.tasks.cancel()
     _wait(qtbot, win)
@@ -656,4 +660,132 @@ def test_walk_through_is_kept_and_panels_can_be_hidden(window, qtbot, scans):
         win.view.leave_walk()
         assert win.view.b_panels.isChecked()
     win.set_panels_hidden(False)
+    win.doc.dirty = False
+
+
+def test_edit_and_measure_in_the_walk_through(window, qtbot, scans):
+    """Every Edit tool and Measure work inside the walk-through, on the
+    walk-through's own points, and edits show there at once."""
+    from PySide6.QtCore import QPoint
+
+    win = window()
+    win.resize(1200, 800)
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    win.show()
+    qtbot.waitExposed(win)
+    doc, view, panel = win.doc, win.view, win.edit_panel
+    win.modes.setCurrentIndex(1)  # Edit
+    win.walk_through()
+    _wait(qtbot, win)
+    assert view.walking
+    walk = view._walk
+    fly = walk.view
+    sc = fly.scene
+    assert sc.edits is not None and sc.project_frame
+
+    def screen(i):
+        """Where vertex i is on the screen, and its project-frame position."""
+        p = sc.vertices["pos"][i].astype(float) + sc.origin
+        c = fly.camera_mvp() @ np.r_[p, 1.0]
+        return QPoint(int(round((c[0] / c[3] + 1) / 2 * fly.width())),
+                      int(round((1 - c[1] / c[3]) / 2 * fly.height()))), p
+
+    def visible_vertex():
+        mvp = fly.camera_mvp()
+        p = sc.vertices["pos"].astype(float) + sc.origin
+        c = p @ mvp[:3, :3].T + mvp[:3, 3]
+        w = p @ mvp[3, :3] + mvp[3, 3]
+        ndc = c[:, :2] / np.maximum(w, 1e-9)[:, None]
+        ok = np.flatnonzero((w > 1.0) & np.all(np.abs(ndc) < 0.5, axis=1))
+        assert len(ok)
+        return int(ok[len(ok) // 2])
+
+    # brush: click selects the points around the picked one
+    panel.choose_tool("brush")
+    assert fly.tool is not None and fly.tool.name == "brush" and fly.tool.view is fly
+    assert "Right-drag: look around" in walk.help.text()
+    pt, _ = screen(visible_vertex())
+    qtbot.mouseClick(fly, Qt.LeftButton, pos=pt)
+    assert panel.regions and fly._selected is not None and fly._selected.any()
+    assert not fly.locked  # with a tool, a click does not capture the mouse
+    n_sel = int(fly._selected.sum())
+    assert (fly._flags == 1).sum() == n_sel
+
+    # delete: hidden at once in the walk-through, back with undo
+    win.a_delete.trigger()
+    assert len(doc.project.edits.point_edits) == 1
+    assert sc.hidden is not None and sc.hidden.sum() >= n_sel
+    assert (fly._flags == 2).sum() == sc.hidden.sum()
+    panel.undo()
+    assert sc.hidden is None
+    panel.redo()
+    assert sc.hidden is not None
+
+    # restore: show the deleted points, select them, restore
+    panel.cb_show_deleted.setChecked(True)
+    assert sc.hidden is None and (fly._flags == 3).any()
+    k = int(np.flatnonzero(sc.edits.deleted)[0])
+    pt, p = screen(k)
+    panel.choose_tool("brush")
+    fly._hover_depth = None
+    qtbot.mouseClick(fly, Qt.LeftButton, pos=pt)
+    assert panel.regions
+    panel.restore_selection()
+    assert len(doc.project.edits.point_edits) == 2
+    panel.cb_show_deleted.setChecked(False)
+
+    # lasso and rectangle: the region stops just past the nearest surface
+    panel.choose_tool("rectangle")
+    assert walk.reach.isVisible() or not walk.isVisible()
+    c = QPoint(fly.width() // 2, fly.height() // 2)
+    qtbot.mousePress(fly, Qt.LeftButton, pos=c - QPoint(60, 60))
+    qtbot.mouseMove(fly, c + QPoint(60, 60))
+    qtbot.mouseRelease(fly, Qt.LeftButton, pos=c + QPoint(60, 60))
+    assert panel.regions
+    r = panel.regions[-1]
+    assert r.kind == "screen" and r.far is not None and r.far > 0
+    assert fly._selected.any()
+    panel.clear_selection()
+    assert fly._selected is None or not fly._selected.any()
+
+    # object: grown over the walk-through's points near the click
+    panel.choose_tool("object")
+    pt, _ = screen(visible_vertex())
+    qtbot.mouseClick(fly, Qt.LeftButton, pos=pt)  # (may find no object: just no error)
+    panel.clear_selection()
+
+    # cut line: splits the site into two parts
+    panel.choose_tool("cut")
+    qtbot.mousePress(fly, Qt.LeftButton, pos=QPoint(fly.width() // 2, 20))
+    qtbot.mouseMove(fly, QPoint(fly.width() // 2, fly.height() - 20))
+    qtbot.mouseRelease(fly, Qt.LeftButton, pos=QPoint(fly.width() // 2, fly.height() - 20))
+    assert len(doc.project.edits.parts) == 2
+    doc.set_part_visible(doc.project.edits.parts[0].id, False)
+    assert sc.edits.outside_parts.any() and sc.hidden is not None
+
+    # measure (M) works in the walk-through: two clicks, saved in the project
+    win.a_measure.trigger()
+    assert fly.tool is not None and fly.tool.name == "measure"
+    vis = np.flatnonzero(~sc.hidden)
+    mvp = fly.camera_mvp()
+    p = sc.vertices["pos"][vis].astype(float) + sc.origin
+    w = p @ mvp[3, :3] + mvp[3, 3]
+    ndc = (p @ mvp[:3, :3].T + mvp[:3, 3])[:, :2] / np.maximum(w, 1e-9)[:, None]
+    ok = vis[(w > 1.0) & np.all(np.abs(ndc) < 0.6, axis=1)]
+    a, _ = screen(int(ok[0]))
+    b, _ = screen(int(ok[-1]))
+    qtbot.mouseClick(fly, Qt.LeftButton, pos=a)
+    assert fly._pending is not None
+    qtbot.mouseClick(fly, Qt.LeftButton, pos=b)
+    assert len(doc.measurements) == 1 and doc.measurements[0].kind == "distance"
+    assert fly._pending is None
+    # Esc first cancels a half-made measurement, then leaves the walk-through
+    qtbot.mouseClick(fly, Qt.LeftButton, pos=a)
+    qtbot.keyClick(fly, Qt.Key_Escape)
+    assert fly._pending is None and view.walking
+    fly.grab()  # the overlay draws the measurement without errors
+    qtbot.keyClick(fly, Qt.Key_Escape)
+    assert not view.walking
+    assert view.tool is not None and view.tool.view is view  # back to the orbit view
     win.doc.dirty = False

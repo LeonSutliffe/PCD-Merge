@@ -60,6 +60,15 @@ class Scene:
     scan_id: np.ndarray | None = None
     intensity: np.ndarray | None = None
     rgb: np.ndarray | None = None
+    # Editing in the walk-through (see :class:`SceneEdits`): the scan key of
+    # each scan id (None: a merged file, which edits don't touch), whether
+    # the points are in the project frame (aligned, where edits and
+    # measurements live), and per vertex what is hidden.
+    scan_keys: list = field(default_factory=list)
+    project_frame: bool = True
+    hidden: np.ndarray | None = None  # bool: not drawn at all
+    chunk_live: np.ndarray | None = None  # per chunk: points not hidden
+    edits: object = None  # a SceneEdits, once edits are applied
 
     def __len__(self) -> int:
         return len(self.vertices)
@@ -312,6 +321,8 @@ def plan_frame(scene: Scene, eye: np.ndarray, mvp: np.ndarray, focal_px: float,
     r = scene.chunk_radius.astype(np.float64)
     planes = frustum_planes(mvp)
     vis = np.all(c @ planes[:, :3].T + planes[:, 3] >= -r[:, None], axis=1)
+    if scene.chunk_live is not None:
+        vis &= scene.chunk_live > 0  # every point deleted or in a hidden part
     idx = np.flatnonzero(vis)
     if len(idx) == 0:
         return FramePlan([], 0)
@@ -434,3 +445,178 @@ def default_speed(scene: Scene) -> float:
     if 5 <= diag <= 3000:
         return 2.0
     return max(diag / 30, 1e-3)
+
+
+# --------------------------------------------------------------------------
+# Editing and measuring in the walk-through
+#
+# The walk-through's points are a sample of the scans, already moved into
+# the project frame. Edits are regions in that frame, so they are tested on
+# the sample directly: no full-resolution points are needed to show them.
+
+BLOCK = 2_000_000  # vertices tested at a time (keeps temporary arrays small)
+
+
+def chunk_ranges(scene: Scene, chunks) -> np.ndarray:
+    """Vertex indices of these chunks, in order."""
+    chunks = np.asarray(chunks, dtype=np.int64)
+    if not len(chunks):
+        return np.zeros(0, dtype=np.int64)
+    starts, counts = scene.chunk_start[chunks], scene.chunk_count[chunks]
+    total = int(counts.sum())
+    offs = np.repeat(starts - np.concatenate([[0], np.cumsum(counts)[:-1]]), counts)
+    return np.arange(total, dtype=np.int64) + offs
+
+
+def world(scene: Scene, idx=None) -> np.ndarray:
+    """Project-frame (float64) positions of vertices ``idx`` (all if None)."""
+    pos = scene.vertices["pos"] if idx is None else scene.vertices["pos"][idx]
+    return pos.astype(np.float64) + scene.origin
+
+
+def region_mask(scene: Scene, region) -> np.ndarray:
+    """Which vertices are inside ``region`` (an edits Region, or a Part)."""
+    n = len(scene)
+    out = np.zeros(n, dtype=bool)
+    test = region.mask if hasattr(region, "mask") else region.contains
+    bounds = region.bounds() if hasattr(region, "bounds") else None
+    if bounds is not None:
+        lo, hi = (np.asarray(b, float) - scene.origin for b in bounds)
+        c = scene.chunk_centre.astype(np.float64)
+        r = scene.chunk_radius.astype(np.float64)[:, None]
+        near = np.flatnonzero(np.all((c + r >= lo) & (c - r <= hi), axis=1))
+        idx = chunk_ranges(scene, near)
+        for k in range(0, len(idx), BLOCK):
+            part = idx[k:k + BLOCK]
+            out[part] = test(world(scene, part))
+        return out
+    for k in range(0, n, BLOCK):
+        out[k:k + BLOCK] = test(world(scene, slice(k, k + BLOCK)))
+    return out
+
+
+class SceneEdits:
+    """The project's edits applied to a walk-through scene.
+
+    Each region is tested on the scene once and remembered (packed to one
+    bit per point), so after an edit, an undo or a part shown or hidden only
+    new regions cost anything.
+    """
+
+    def __init__(self, scene: Scene):
+        self.scene = scene
+        self._masks = {}  # id(region or part) -> (the object, packed mask)
+        ids = scene.scan_id
+        self._scan_of = ids if ids is not None else np.zeros(len(scene), np.uint8)
+        self.deleted = np.zeros(len(scene), dtype=bool)
+        self.outside_parts = np.zeros(len(scene), dtype=bool)
+
+    def mask(self, obj) -> np.ndarray:
+        hit = self._masks.get(id(obj))
+        if hit is not None and hit[0] is obj:
+            return np.unpackbits(hit[1], count=len(self.scene)).astype(bool)
+        m = region_mask(self.scene, obj)
+        self._masks[id(obj)] = (obj, np.packbits(m))
+        return m
+
+    def _scans_in(self, keys) -> np.ndarray:
+        """Vertices of the scans with these keys (merged files never)."""
+        want = np.array([k is not None and k in keys for k in self.scene.scan_keys]
+                        or [False], dtype=bool)
+        return want[np.minimum(self._scan_of, len(want) - 1)]
+
+    def update(self, stack) -> None:
+        """Recompute what is deleted and what lies outside the visible parts."""
+        scene = self.scene
+        n = len(scene)
+        editable = self._scans_in(set(k for k in scene.scan_keys if k is not None))
+        deleted = np.zeros(n, dtype=bool)
+        outside = np.zeros(n, dtype=bool)
+        if stack is not None:
+            for e in stack.point_edits:
+                m = self.mask(e.region) & editable
+                if e.scans is not None:
+                    m &= self._scans_in(set(e.scans))
+                if e.action == "delete":
+                    deleted |= m
+                else:
+                    deleted &= ~m
+            if stack.parts:
+                inside = np.zeros(n, dtype=bool)
+                for p in stack.parts:
+                    if p.visible:
+                        inside |= self.mask(p)
+                outside = ~inside & editable
+        self.deleted, self.outside_parts = deleted, outside
+
+    def hidden(self, show_deleted: bool = False) -> np.ndarray:
+        return self.outside_parts if show_deleted else self.outside_parts | self.deleted
+
+    def apply(self, show_deleted: bool = False) -> None:
+        """Store what is hidden on the scene (for drawing and picking)."""
+        h = self.hidden(show_deleted)
+        self.scene.hidden = h if h.any() else None
+        if self.scene.hidden is None:
+            self.scene.chunk_live = None
+        else:
+            chunk = np.repeat(np.arange(len(self.scene.chunk_count)), self.scene.chunk_count)
+            self.scene.chunk_live = np.bincount(chunk[~h], minlength=len(self.scene.chunk_count))
+
+
+def pick(scene: Scene, mvp: np.ndarray, ndc, size_px, radius_px: float = 7.0,
+         skip: np.ndarray | None = None):
+    """The nearest point under a screen position, as an index into the
+    vertices, or None. ``mvp`` maps scene positions (relative to the
+    origin) to clip space; ``ndc`` is the position in device coordinates
+    (-1..1) and ``size_px`` the view's (width, height) in pixels."""
+    m = np.asarray(mvp, dtype=np.float64)
+    half = np.array([size_px[0] / 2.0, size_px[1] / 2.0])
+    target = np.asarray(ndc, dtype=np.float64)
+    c = scene.chunk_centre.astype(np.float64)
+    r = scene.chunk_radius.astype(np.float64)
+    clip = c @ m[:3, :3].T + m[:3, 3]
+    w = c @ m[3, :3] + m[3, 3]
+    scale = max(abs(m[1, 1]), abs(m[0, 0])) * half.max()  # pixels per unit at depth 1
+    inside = w <= r * 1.01  # the camera is in (or right next to) the chunk
+    ok = w > 1e-9
+    d = np.full(len(c), np.inf)
+    d[ok] = np.linalg.norm((clip[ok, :2] / w[ok, None] - target) * half, axis=1)
+    rad = np.where(ok, r * scale / np.maximum(w, 1e-9), np.inf)
+    cand = np.flatnonzero(inside | (d <= rad + radius_px))
+    if scene.chunk_live is not None:
+        cand = cand[scene.chunk_live[cand] > 0]
+    idx = chunk_ranges(scene, cand)
+    if skip is not None and len(idx):
+        idx = idx[~skip[idx]]
+    best, best_w = None, np.inf
+    for k in range(0, len(idx), BLOCK):
+        part = idx[k:k + BLOCK]
+        p = scene.vertices["pos"][part].astype(np.float64)
+        pc = p @ m[:3, :3].T + m[:3, 3]
+        pw = p @ m[3, :3] + m[3, 3]
+        front = pw > 1e-9
+        if not front.any():
+            continue
+        dd = (pc[front, :2] / pw[front, None] - target) * half
+        near = np.einsum("ij,ij->i", dd, dd) <= radius_px * radius_px
+        if near.any():
+            ws = pw[front][near]
+            j = int(np.argmin(ws))
+            if ws[j] < best_w:
+                best_w, best = ws[j], int(part[front][near][j])
+    return best
+
+
+def near_points(scene: Scene, centre, radius: float, skip: np.ndarray | None = None):
+    """Project-frame positions of the vertices within ``radius`` (a cube) of
+    ``centre`` (project frame): what grow-to-object searches."""
+    lo = np.asarray(centre, float) - scene.origin - radius
+    hi = lo + 2 * radius
+    c = scene.chunk_centre.astype(np.float64)
+    r = scene.chunk_radius.astype(np.float64)[:, None]
+    idx = chunk_ranges(scene, np.flatnonzero(np.all((c + r >= lo) & (c - r <= hi), axis=1)))
+    if skip is not None and len(idx):
+        idx = idx[~skip[idx]]
+    p = scene.vertices["pos"][idx].astype(np.float64)
+    keep = np.all((p >= lo) & (p <= hi), axis=1)
+    return p[keep] + scene.origin

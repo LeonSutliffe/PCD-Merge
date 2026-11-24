@@ -52,6 +52,7 @@ class View3D(QWidget):
         self._walk = None
         self._walk_resume = None  # (scene, camera position, yaw, pitch, speed) of the last walk
         self._walk_preparing = False
+        self._redraw_pending = False  # the orbit view changed while walking
         self.panels_hidden = False
         self._ortho = False
         self.removed_hidden = False  # clean-up preview: hide removed points instead of white
@@ -253,6 +254,9 @@ class View3D(QWidget):
         if self.view is None:
             return
         self._redraw_soon.stop()
+        if self._walk is not None:  # hidden behind the walk-through: draw when back
+            self._redraw_pending = True
+            return
         for it in self._items:
             self.view.removeItem(it)
         self._items = []
@@ -341,6 +345,10 @@ class View3D(QWidget):
     def draw_measurements(self):
         """(Re)draw the measurements and the pending point, not the clouds."""
         if self.view is None:
+            return
+        if self._walk is not None:
+            self._walk.view.overlay.update()
+            self._redraw_pending = True
             return
         for it in self._meas_items:
             self.view.removeItem(it)
@@ -489,6 +497,8 @@ class View3D(QWidget):
             self.tool.cancel()
         self.tool = tool
         self._pending = None
+        if self._walk is not None:
+            self._walk.view.set_tool(tool if self._walk_tool(tool) else None)
         measuring = tool is not None and tool.name == "measure"
         if self.b_measure.isChecked() != measuring:
             self.b_measure.blockSignals(True)
@@ -506,6 +516,9 @@ class View3D(QWidget):
         self._sel_masks = {}
         for r in self.selection:
             self._or_selection(r)
+        if self._walk is not None:
+            self._walk.view.set_show_deleted(self.edit_mode and self.show_deleted)
+            self._walk.view.set_selection(self.selection)
         self.redraw()
         self.selection_changed.emit()
 
@@ -513,8 +526,25 @@ class View3D(QWidget):
         """Add one region to the selection (a brush dab, a lasso)."""
         self.selection.append(region)
         self._or_selection(region)
+        if self._walk is not None:
+            self._walk.view.extend_selection(region)
         self.redraw_soon()
         self.selection_changed.emit()
+
+    def shape_region(self, ndc):
+        """A lasso or rectangle drawn in the view, as a region."""
+        from ..edits import ScreenShape
+
+        return ScreenShape(ndc, self.camera_mvp())
+
+    def object_points(self, seed):
+        """The points grow-to-object searches: every drawn, shown point."""
+        pts = []
+        for i, scan in enumerate(self.doc.scans):
+            if scan.entry.visible:
+                proj, hidden = self.project_points(i)
+                pts.append(proj[~hidden])
+        return np.concatenate(pts) if pts else np.zeros((0, 3))
 
     def _or_selection(self, region):
         for i, scan in enumerate(self.doc.scans):
@@ -607,6 +637,9 @@ class View3D(QWidget):
         return (lo + hi) / 2, float(np.linalg.norm(hi - lo)) or 1.0
 
     def fit(self):
+        if self._walk is not None:  # Home in the walk-through: back to the start
+            self._walk.view.go_to_start()
+            return
         self.redraw()
         self.camera.setCurrentIndex(0)
         self._apply_camera(35, -60)
@@ -668,6 +701,13 @@ class View3D(QWidget):
             r = self._walk_resume
             if r is not None and r[0] is scene:  # back in where it was left
                 self._walk.resume(*r[1:])
+            fly = self._walk.view
+            fly.measurements = lambda: self.doc.measurements
+            fly.edits_changed(self.doc.project.edits)
+            fly.set_show_deleted(self.edit_mode and self.show_deleted)
+            fly.set_selection(self.selection)
+            if self._walk_tool(self.tool):
+                fly.set_tool(self.tool)
             self.stack.addWidget(self._walk)
             self.stack.setCurrentWidget(self._walk)
         except Exception as e:  # pragma: no cover - depends on the graphics driver
@@ -691,6 +731,9 @@ class View3D(QWidget):
         if self._walk is None:
             return
         w, self._walk = self._walk, None
+        if self.tool is not None:  # the tool works in the orbit view again
+            self.tool.cancel()
+            self.tool.view = self
         cam = w.view.cam
         self._walk_resume = (w.scene, cam.pos.copy(), cam.yaw, cam.pitch, w.view.speed)
         w.view.release_gl()
@@ -699,6 +742,20 @@ class View3D(QWidget):
         w.deleteLater()
         self.toolbar.show()
         self.bottom.show()
+        if self._redraw_pending:
+            self._redraw_pending = False
+            self.redraw()
+
+    def _walk_tool(self, tool) -> bool:
+        """Tools that work in the walk-through (not align-by-hand's picks)."""
+        from ..flythrough import WALK_TOOLS
+
+        return tool is not None and tool.name in WALK_TOOLS
+
+    def walk_edits_changed(self):
+        """The edits changed while walking: show them there at once."""
+        if self._walk is not None:
+            self._walk.view.edits_changed(self.doc.project.edits)
 
     def forget_walk(self):
         """The kept walk-through is out of date: leave it and forget it."""

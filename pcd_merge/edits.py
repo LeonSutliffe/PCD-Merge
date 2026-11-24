@@ -126,10 +126,13 @@ class ScreenShape(Region):
     """A lasso or rectangle drawn on the screen, through the whole depth of
     the view. ``polygon`` is in normalised device coordinates (-1..1) and
     ``mvp`` maps project-frame points to clip space with the camera of the
-    moment it was drawn (with any drawing offset already folded in)."""
+    moment it was drawn (with any drawing offset already folded in).
+    ``far`` (walk-through) stops it that far from the camera, so a lasso
+    round a chair does not also take the rooms behind the wall."""
 
     polygon: np.ndarray
     mvp: np.ndarray
+    far: float | None = None
     kind = "screen"
 
     def __post_init__(self):
@@ -142,6 +145,8 @@ class ScreenShape(Region):
         clip = xyz @ self.mvp[:3, :3].T + self.mvp[:3, 3]
         w = xyz @ self.mvp[3, :3] + self.mvp[3, 3]
         front = w > 1e-9
+        if self.far is not None:
+            front &= w <= self.far
         out = np.zeros(len(xyz), dtype=bool)
         if front.any():
             ndc = clip[front, :2] / w[front, None]
@@ -154,7 +159,10 @@ class ScreenShape(Region):
         return out
 
     def to_dict(self):
-        return {"kind": self.kind, "polygon": self.polygon.tolist(), "mvp": self.mvp.tolist()}
+        d = {"kind": self.kind, "polygon": self.polygon.tolist(), "mvp": self.mvp.tolist()}
+        if self.far is not None:
+            d["far"] = float(self.far)
+        return d
 
 
 @dataclass

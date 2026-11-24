@@ -305,11 +305,13 @@ class MainWindow(QMainWindow):
             self.view.redraw()
             self.edit_panel.refresh()
         elif what == "parts":
+            self.view.walk_edits_changed()
             self.edit_panel.refresh()
         elif what == "measurements":
             self.view.draw_measurements()
             self.inspect_panel.refresh()
         elif what == "edits":
+            self.view.walk_edits_changed()
             self.edit_panel.edits_changed()
             self.align_panel.update_cleanup_summary()
         elif what == "project":
@@ -491,7 +493,9 @@ class MainWindow(QMainWindow):
 
         return (tuple(doc.scans[i].entry.key for i in shown), aligned,
                 tuple(tfs[i].tobytes() for i in shown) if aligned else (),
-                tuple(stamp(p) for p in merged), doc.edit_version)
+                tuple(stamp(p) for p in merged),
+                # original positions of aligned scans leave deleted points out
+                doc.edit_version if doc.aligned and not aligned else None)
 
     def forget_walk(self) -> None:
         """Drop the kept walk-through scene (it can be hundreds of MB)."""
@@ -508,6 +512,8 @@ class MainWindow(QMainWindow):
         keys = [self.doc.scans[i].entry.key for i in shown]
 
         def done(scene):
+            # edits and measurements live in the project frame (aligned)
+            scene.project_frame = aligned or not self.doc.aligned
             self._walk_key, self._walk_scene, self._walk_title = key, scene, title
             self._walk_ready(scene, title)
 
@@ -683,10 +689,17 @@ class MainWindow(QMainWindow):
 
 
 def walk_scene(clouds, transforms, edit_transforms, edits, keys, merged=(), *, progress):
-    """The walk-through's scene, without the points deleted in Edit mode.
-    ``merged`` are merged clouds shown in the view (files, already in the
-    project frame), walked through with the scans."""
-    if edits is not None:
+    """The walk-through's scene. Deleted points and hidden parts are not
+    left out but hidden (:class:`~pcd_merge.flyscene.SceneEdits`), so edits
+    made, undone or restored while walking show at once. ``merged`` are
+    merged clouds shown in the view (files, already in the project frame),
+    walked through with the scans; edits don't apply to them."""
+    from ..flyscene import SceneEdits
+
+    same_frame = all(np.allclose(a, b) for a, b in zip(transforms, edit_transforms))
+    if edits is not None and not same_frame:
+        # Original positions of aligned scans: the edits (project frame) are
+        # not where these points are drawn, so leave the points out as before.
         from ..edits import filter_clouds
 
         progress("Leaving out deleted points", 0.0)
@@ -703,7 +716,14 @@ def walk_scene(clouds, transforms, edit_transforms, edits, keys, merged=(), *, p
             clouds.append(read_cloud(path, progress=lambda f, m=msg, k=k: progress(
                 m, 0.3 * (k + f) / len(merged))))
             transforms.append(np.eye(4))
-    return build_scene(clouds, transforms, progress=progress)
+    scene = build_scene(clouds, transforms, progress=progress)
+    scene.scan_keys = list(keys) + [None] * len(merged)
+    if same_frame:
+        progress("Applying the edits", 0.97)
+        scene.edits = SceneEdits(scene)
+        scene.edits.update(edits)
+        scene.edits.apply()
+    return scene
 
 
 def _in_parts(cloud, t, parts):

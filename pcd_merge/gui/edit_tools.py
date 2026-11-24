@@ -13,7 +13,7 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPen, QPolygonF
 
-from ..edits import ScreenShape, Sphere
+from ..edits import Sphere
 
 OUTLINE = QColor(255, 220, 40)
 
@@ -132,7 +132,7 @@ class _ShapeTool(Tool):
             return True
         ndc = np.array([self.view.ndc(p) for p in poly])
         self.panel.begin_selection(add=self._add, kind=self.name)
-        self.panel.extend_selection(ScreenShape(ndc, self.view.camera_mvp()))
+        self.panel.extend_selection(self.view.shape_region(ndc))
         return True
 
     def cancel(self):
@@ -203,7 +203,7 @@ class GrowTool(Tool):
     def press(self, ev):
         hit = self.view.pick(ev.position())
         if hit is not None:
-            self.panel.grow_at(hit, add=_adding(ev))
+            self.panel.grow_at(hit, add=_adding(ev), points=self.view.object_points(hit))
         return True
 
     def move(self, ev):
