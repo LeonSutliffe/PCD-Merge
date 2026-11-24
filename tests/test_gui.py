@@ -789,3 +789,24 @@ def test_edit_and_measure_in_the_walk_through(window, qtbot, scans):
     assert not view.walking
     assert view.tool is not None and view.tool.view is view  # back to the orbit view
     win.doc.dirty = False
+
+
+def test_make_browser_walk_through(window, qtbot, scans, tmp_path, monkeypatch):
+    from pcd_merge.gui import main_window as mw
+    from pcd_merge.measure import Measurement
+
+    monkeypatch.setattr(mw.QMessageBox, "exec", lambda self: 0)
+    win = window()
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    win.modes.setCurrentIndex(2)
+    panel = win.inspect_panel
+    assert panel.b_web.isEnabled()
+    win.doc.add_measurement(Measurement("point", [win.doc.origin()]))
+    out = str(tmp_path / "site.html")
+    win.make_browser_walk(20_000, out)
+    _wait(qtbot, win)
+    text = open(out, encoding="utf-8").read()
+    assert text.startswith("<!doctype html>") and '"measurements":[{' in text
+    assert "Saved the browser walk-through" in win.tasks.status.text()
+    win.doc.dirty = False

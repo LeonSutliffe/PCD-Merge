@@ -528,6 +528,64 @@ class MainWindow(QMainWindow):
             self.tasks.set_status("Walk-through: click into the view, then use W A S D and "
                                   "the mouse. Esc or Leave walk-through to go back.")
 
+    # ---------------------------------------------------------------- browser walk-through
+
+    def make_browser_walk(self, max_points: int, path: str | None = None):
+        """Save a walk-through that opens in a web browser (webview.py): the
+        ticked scans, aligned, without deleted points, plus ticked merged
+        clouds, and the visible measurements."""
+        doc = self.doc
+        if self.tasks.busy:
+            QMessageBox.information(self, "PCD Merge", "Something is still running (see the "
+                                    "bottom of the window). Try again when it has finished.")
+            return
+        shown = [i for i, s in enumerate(doc.scans) if s.entry.visible]
+        merged = [e["path"] for e in doc.project.exports
+                  if e.get("visible") and os.path.isfile(e["path"])]
+        if not shown and not merged:
+            QMessageBox.information(self, "PCD Merge", "Tick at least one scan or merged cloud "
+                                    "in the list on the left: the browser walk-through shows "
+                                    "what is ticked.")
+            return
+        if path is None:
+            folder = doc.project.folder if doc.project.saved else ""
+            start = os.path.join(folder, f"{doc.project.name} walk-through.html")
+            path, _ = QFileDialog.getSaveFileName(self, "Save browser walk-through", start,
+                                                  "Web page (*.html)")
+            if not path:
+                return
+            if not path.lower().endswith((".html", ".htm")):
+                path += ".html"
+        tfs = doc.transforms()
+        title = doc.project.name or "Walk-through"
+        measurements = [m for m in doc.measurements if m.visible]
+
+        def run():
+            from ..webview import browser_walk_job
+
+            clouds = [doc.scans[i].cloud for i in shown]
+            self.tasks.run(browser_walk_job,
+                           (clouds, [tfs[i] for i in shown], doc.edit_snapshot(),
+                            [doc.scans[i].entry.key for i in shown], merged, path, max_points,
+                            title, measurements, __version__),
+                           self._browser_walk_done, "Making the browser walk-through…")
+
+        self.with_clouds(run, shown)
+
+    def _browser_walk_done(self, payload):
+        path, size, points = payload
+        self.tasks.set_status(f"Saved the browser walk-through ({points / 1e6:.1f} million points, "
+                              f"{size / 1e6:.0f} MB) to {path}")
+        box = QMessageBox(QMessageBox.Information, "Browser walk-through",
+                          f"Saved {os.path.basename(path)} ({size / 1e6:.0f} MB).\n\n"
+                          "Double-click it to open it in a web browser, or send it to anyone: "
+                          "it needs no app and no internet.", parent=self)
+        b_open = box.addButton("Open it now", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is b_open:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
     # ---------------------------------------------------------------- projects
 
     def _confirm_discard(self) -> bool:

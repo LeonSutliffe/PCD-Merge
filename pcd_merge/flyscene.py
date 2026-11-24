@@ -163,18 +163,23 @@ def _no_progress(msg, frac):
 
 
 def build_scene(clouds, transforms=None, max_points: int = DEFAULT_MAX_POINTS,
-                progress=None, seed: int = 0) -> Scene:
+                progress=None, seed: int = 0, even: bool = False,
+                chunk_points: int = TARGET_CHUNK_POINTS) -> Scene:
     """Prepare clouds (pcd_io.PointCloud, already loaded) for the fly-through.
 
     ``transforms`` (4x4 each) move every cloud into the common frame; None
     means they are already there (a merged cloud, or one scan on its own).
+    ``even``: thin to ``max_points`` evenly in space (at most one point per
+    small cube) instead of at random, so areas far from every scanner keep
+    as much detail as those next to one (for the browser walk-through,
+    whose point budget is much smaller than the scans).
     """
     progress = progress or _no_progress
     if transforms is None:
         transforms = [np.eye(4)] * len(clouds)
     rng = np.random.default_rng(seed)
     total = sum(len(c) for c in clouds)
-    keep_frac = min(1.0, max_points / max(total, 1))
+    keep_frac = min(1.0, (4 if even else 1) * max_points / max(total, 1))
     want_rgb = all(_rgb_of(c.data[:1]) is not None for c in clouds)
     want_int = all(c.has_field("intensity") for c in clouds)
 
@@ -202,6 +207,15 @@ def build_scene(clouds, transforms=None, max_points: int = DEFAULT_MAX_POINTS,
 
     xyz = np.concatenate(parts) if parts else np.zeros((0, 3))
     del parts
+    ids = np.concatenate(ids) if ids else np.zeros(0, np.uint8)
+    ints = np.concatenate(ints) if want_int and ints else None
+    rgbs = np.concatenate(rgbs) if want_rgb and rgbs else None
+    if even and len(xyz) > max_points:
+        progress("Thinning evenly", 0.62)
+        keep = even_subset(xyz, max_points, rng)
+        xyz, ids = xyz[keep], ids[keep]
+        ints = ints[keep] if ints is not None else None
+        rgbs = rgbs[keep] if rgbs is not None else None
     n = len(xyz)
     if n == 0:
         raise ValueError("there are no points to show")
@@ -212,7 +226,7 @@ def build_scene(clouds, transforms=None, max_points: int = DEFAULT_MAX_POINTS,
     rel = (xyz - origin).astype(np.float32)
     del xyz
 
-    cell = _pick_cell(rel, rng)
+    cell = _pick_cell(rel, rng, chunk_points)
     keys, inverse = _chunk_keys(rel, cell)
     # Sort by chunk, with random low bits so the order inside a chunk is random.
     sort_key = (inverse.astype(np.int64) << 24) | rng.integers(0, 1 << 24, n, dtype=np.int64)
@@ -238,9 +252,9 @@ def build_scene(clouds, transforms=None, max_points: int = DEFAULT_MAX_POINTS,
         lo=(lo_w - origin).astype(np.float32), hi=(hi_w - origin).astype(np.float32),
         scan_positions=[(name, (p - origin).astype(np.float32)) for name, p in positions],
         names=[c.name for c in clouds], total_points=total,
-        scan_id=np.concatenate(ids)[order],
-        intensity=np.concatenate(ints)[order] if want_int else None,
-        rgb=np.concatenate(rgbs)[order] if want_rgb else None,
+        scan_id=ids[order],
+        intensity=ints[order] if ints is not None else None,
+        rgb=rgbs[order] if rgbs is not None else None,
     )
     progress("Preparing fly-through: colours", 0.95)
     scene.set_colours(scene.colour_modes[0])
@@ -255,18 +269,51 @@ def _chunk_keys(rel: np.ndarray, cell: float):
     return np.unique(flat, return_inverse=True)
 
 
-def _pick_cell(rel: np.ndarray, rng) -> float:
-    """Grid size giving about TARGET_CHUNK_POINTS points per occupied cube."""
+def even_subset(xyz: np.ndarray, target: int, rng) -> np.ndarray:
+    """Indices of about ``target`` points spread evenly: at most one per
+    cube of a grid sized for that many occupied cubes (then a random cut
+    if still too many)."""
+    n = len(xyz)
+    if n <= target:
+        return np.arange(n)
+    order = rng.permutation(n)  # which point of a cube is kept: a random one
+    ext = float(np.max(np.ptp(xyz, axis=0))) or 1.0
+    # Points sample surfaces: occupied cubes go as 1 / cell^2.
+    sample = xyz[rng.integers(0, n, min(n, 1_000_000))]
+    cell = ext / 100
+    for _ in range(4):
+        occ = len(np.unique(_grid_keys(sample, cell)))
+        est = occ * (n / len(sample)) ** 0.5 if len(sample) < n else occ
+        cell *= float(np.clip(np.sqrt(est / target), 0.3, 3.0))
+    for _ in range(4):
+        keys = _grid_keys(xyz[order], cell)
+        _, first = np.unique(keys, return_index=True)
+        if len(first) >= 0.8 * target or cell < ext * 1e-6:
+            break
+        cell *= 0.8 * np.sqrt(len(first) / target)
+    keep = order[first]
+    if len(keep) > target:
+        keep = rng.choice(keep, target, replace=False)
+    return np.sort(keep)
+
+
+def _grid_keys(xyz: np.ndarray, cell: float) -> np.ndarray:
+    g = np.floor((xyz - xyz.min(axis=0)) / cell).astype(np.int64)
+    return (g[:, 0] << 42) ^ (g[:, 1] << 21) ^ g[:, 2]
+
+
+def _pick_cell(rel: np.ndarray, rng, target: int = TARGET_CHUNK_POINTS) -> float:
+    """Grid size giving about ``target`` points per occupied cube."""
     n = len(rel)
     ext = float(np.max(np.ptp(rel, axis=0))) or 1.0
-    if n <= TARGET_CHUNK_POINTS:
+    if n <= target:
         return ext + 1e-3
     sample = rel[rng.integers(0, n, 400_000)] if n > 400_000 else rel
     cell = ext / 32
     for _ in range(3):
         per = n / len(_chunk_keys(sample, cell)[0])
         # Points sample surfaces, so points per cube grows with the cube's area.
-        cell *= float(np.clip(np.sqrt(TARGET_CHUNK_POINTS / max(per, 1e-9)), 0.25, 4.0))
+        cell *= float(np.clip(np.sqrt(target / max(per, 1e-9)), 0.25, 4.0))
     return max(cell, ext / 2000)
 
 
