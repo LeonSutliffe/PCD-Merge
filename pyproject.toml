@@ -30,7 +30,7 @@ build = ["pyinstaller>=6", "python-lzf>=0.2.4"]
 pcd-merge = "pcd_merge.cli:main"
 
 [tool.setuptools]
-packages = ["pcd_merge", "pcd_merge.gui"]
+packages = ["pcd_merge", "pcd_merge.gui", "pcd_merge.cad"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pcd_merge.__version__" }
