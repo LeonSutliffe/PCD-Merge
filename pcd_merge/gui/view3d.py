@@ -134,7 +134,8 @@ class View3D(QWidget):
         self.b_measure.setToolTip(
             "Click two points for the distance between them (with the horizontal distance, "
             "height difference and slope), or one point for its coordinates. Measurements "
-            "are saved in the project and listed on the left under Measurements. (M)")
+            "are saved in the project and listed on the left under Measurements. Key: M, "
+            "in the walk-through too (again to turn it off).")
         self.b_measure.toggled.connect(self.measure_toggled)
         top.addWidget(self.b_measure)
         b_fit = QPushButton("Reset view")

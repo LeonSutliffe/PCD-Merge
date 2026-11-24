@@ -52,6 +52,9 @@ MEASURE_COLOUR = QColor(90, 220, 255)
 PENDING_COLOUR = QColor(255, 140, 25)
 # tools the walk-through can use (Edit's selection tools, the cut, Measure)
 WALK_TOOLS = ("brush", "rectangle", "lasso", "object", "cut", "measure")
+# their keys (the main window's shortcuts): pressing one again turns it off
+TOOL_KEYS = {"brush": "B", "rectangle": "R", "lasso": "L", "object": "O", "cut": "X",
+             "measure": "M"}
 
 _VERT = """
 #version 120
@@ -942,19 +945,24 @@ class FlyThroughWindow(QWidget):
         self.reach.setVisible(shape)
         if view.tool is not None:
             hint = view.tool.hint.replace("Alt-drag: rotate", "Right-drag: look around")
+            key = TOOL_KEYS.get(view.tool.name, "")
             if view.locked:
                 hint = (f"Click: {view.tool.name} at the cross   W A S D: move   "
                         "Esc: release the mouse")
             else:
                 hint += "   W A S D: move"
+            if key:
+                hint += f"   {key}: tool off"
             self.help.setText(hint)
         elif view.locked:
             self.help.setText("W A S D: move   Mouse: look   Space/E: up   C/Q: down   "
                               "Shift: faster   Wheel: speed   Esc: release the mouse")
         else:
+            tools = ("   Tools: B brush, R rectangle, L lasso, O object, X cut, M measure"
+                     if self.embedded else "")
             self.help.setText("Click the view to look around with the mouse (or drag)   "
                               "W A S D: move   Space/C: up/down   Home: start   Esc: "
-                              + ("leave" if self.embedded else "close"))
+                              + ("leave" if self.embedded else "close") + tools)
         shown = len(self.scene)
         txt = f"{view._drawn / 1e6:.1f} M of {shown / 1e6:.1f} M points drawn"
         if self.scene.total_points > shown:

@@ -35,6 +35,9 @@ TOOL_LABELS = [
 ]
 
 
+TOOL_KEYS = {None: "V", "brush": "B", "rectangle": "R", "lasso": "L", "object": "O", "cut": "X"}
+
+
 class EditPanel(QWidget):
     def __init__(self, win, parent=None):
         super().__init__(parent)
@@ -71,16 +74,16 @@ class EditPanel(QWidget):
         row = None
         for k, (key, label, tip) in enumerate(TOOL_LABELS):
             if key == "cut":  # shown with the split options below
-                b = QRadioButton(label)
-                b.setToolTip(tip)
+                b = QRadioButton(f"{label} ({TOOL_KEYS[key]})")
+                b.setToolTip(f"{tip} Key: {TOOL_KEYS[key]} (again to turn it off).")
                 self.tool_group.addButton(b, k)
                 self.tool_buttons[key] = b
                 continue
             if k % 3 == 0:
                 row = QHBoxLayout()
                 gl_.addLayout(row)
-            b = QRadioButton(label)
-            b.setToolTip(tip)
+            b = QRadioButton(f"{label} ({TOOL_KEYS[key]})")
+            b.setToolTip(f"{tip} Key: {TOOL_KEYS[key]} (again to turn it off).")
             self.tool_group.addButton(b, k)
             self.tool_buttons[key] = b
             row.addWidget(b)
@@ -231,6 +234,10 @@ class EditPanel(QWidget):
             return
         key = TOOL_LABELS[k][0]
         self.view.set_tool(TOOLS[key](self.view, self) if key else None)
+
+    def current_tool(self):
+        """The chosen tool's key (None: Move the view)."""
+        return TOOL_LABELS[max(self.tool_group.checkedId(), 0)][0]
 
     def choose_tool(self, key) -> None:
         self.tool_buttons[key].setChecked(True)
