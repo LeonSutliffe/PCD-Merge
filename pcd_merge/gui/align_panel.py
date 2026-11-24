@@ -27,6 +27,7 @@ from ..quality import assess, fmt_distance
 from ..readers import input_filter
 from ..registration import AlignSettings, align
 from .common import GRADE_COLOURS, HINT_STYLE
+from .save_dialog import ask_save_path
 from .workers import QuietWorker
 
 
@@ -38,6 +39,11 @@ def _ext(path: str) -> str:
     """The file's format extension (".copc.laz" counts as one)."""
     return ".copc.laz" if path.lower().endswith(".copc.laz") else \
         os.path.splitext(path)[1].lower()
+
+
+def _stem(path: str) -> str:
+    name = os.path.basename(path)
+    return name[:-len(_ext(path))] if _ext(path) else name
 
 
 def align_clouds(clouds, settings, previews, quality_ref=None, *, progress):
@@ -491,17 +497,20 @@ class AlignPanel(QWidget):
         export = doc.project.settings.get("export", {})
         ext = fmt or export.get("format", ".pcd")
         base = doc.base
+        suggested = None
         if base is not None and fmt is None:
             ext = _ext(base.entry.path)  # keep adding to the same file
             suggested = base.entry.path
-        elif doc.project.saved:
-            suggested = os.path.join(doc.project.exports_dir, doc.project.name + ext)
-        else:
-            suggested = os.path.join(os.path.dirname(doc.scans[0].entry.path), "merged" + ext)
+        stem = doc.project.name if doc.project.saved else (
+            "merged" if len(doc.scans) > 1 else _stem(doc.scans[0].entry.path) + " cleaned")
+        if part is not None:
+            stem += " - " + part.name
         filters = file_filter()
         chosen = next((f for f in filters.split(";;") if f.endswith(f"(*{ext})")), "")
-        title = "Save viewing file" if fmt == ".copc.laz" else "Save merged cloud"
-        path, selected = QFileDialog.getSaveFileName(self, title, suggested, filters, chosen)
+        title = ("Save viewing file" if fmt == ".copc.laz" else
+                 f"Save part: {part.name}" if part is not None else
+                 "Save merged cloud" if len(doc.scans) > 1 else "Save cleaned cloud")
+        path, selected = ask_save_path(self, title, stem + ext, filters, chosen, doc, suggested)
         if not path:
             return
         typed = _ext(path)
@@ -573,8 +582,8 @@ class AlignPanel(QWidget):
         doc = self.doc
         if doc.result is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Save transforms", "transforms.json",
-                                              "JSON (*.json)")
+        path, _ = ask_save_path(self, "Save transforms", "transforms.json", "JSON (*.json)",
+                                doc=doc)
         if not path:
             return
         keys = [f"{s.entry.path}#{s.entry.index}" if s.entry.scans_in_file > 1 else s.entry.path

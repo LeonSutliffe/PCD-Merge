@@ -145,6 +145,12 @@ it finds them by itself. *Copy scans into the project* makes a project you can
 hand over on its own. *Open a merged cloud as a new project* starts from a
 cloud merged earlier, to add new scans to it.
 
+**Saving files.** Everything the app writes (merged or cleaned clouds, parts,
+viewing files, browser walk-throughs, measurements, screenshots, transforms)
+asks where to save it. The Save As window starts in the folder you last saved
+to (the first time: the scans' folder) and offers a name such as
+`Site - Upstairs.pcd`.
+
 1. Drag scans (`.pcd`, `.ply`, `.las`, `.laz`, `.e57`), or a whole folder
    (subfolders included), onto the window. An E57 file holding several scans
    adds each scan on its own, with its scanner position.

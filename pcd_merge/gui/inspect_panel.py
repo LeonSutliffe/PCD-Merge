@@ -11,13 +11,14 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QGroupBox, QHBoxLayout,
                                QLabel, QListWidget, QListWidgetItem, QPushButton, QRadioButton,
                                QScrollArea, QVBoxLayout, QWidget)
 
 from ..measure import Measurement, write_csv
 from .common import HINT_STYLE
 from .edit_tools import MeasureTool
+from .save_dialog import ask_save_path
 
 ROLE_ID = Qt.UserRole + 1
 SHOT_SCALES = [("As shown", 1), ("2× larger", 2), ("4× larger", 4)]
@@ -266,11 +267,13 @@ class InspectPanel(QWidget):
 
     # ---------------------------------------------------------------- saving
 
+    def _name(self, what: str) -> str:
+        return f"{self.doc.project.name} {what}" if self.doc.project.saved else what
+
     def _export_csv(self):
-        start = os.path.join(self.doc.project.folder, "measurements.csv") \
-            if self.doc.project.saved else "measurements.csv"
-        path, _ = QFileDialog.getSaveFileName(self, "Export measurements", start,
-                                              "CSV spreadsheet (*.csv)")
+        path, _ = ask_save_path(self, "Export measurements",
+                                self._name("measurements.csv"),
+                                "CSV spreadsheet (*.csv)", doc=self.doc)
         if path:
             self.export_csv(path)
 
@@ -281,10 +284,8 @@ class InspectPanel(QWidget):
         self.win.tasks.set_status(f"Saved {len(self.doc.measurements)} measurement(s) to {path}")
 
     def _screenshot_dialog(self):
-        start = os.path.join(self.doc.project.folder, "screenshot.png") \
-            if self.doc.project.saved else "screenshot.png"
-        path, _ = QFileDialog.getSaveFileName(self, "Save screenshot", start,
-                                              "PNG image (*.png);;JPEG image (*.jpg)")
+        path, _ = ask_save_path(self, "Save screenshot", self._name("screenshot.png"),
+                                "PNG image (*.png);;JPEG image (*.jpg)", doc=self.doc)
         if path:
             self.save_screenshot(path, SHOT_SCALES[self.shot_scale.currentIndex()][1])
 

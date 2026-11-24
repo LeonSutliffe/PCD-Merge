@@ -283,14 +283,22 @@ def test_edit_mode_split_into_parts_and_save_one(window, qtbot, scans, tmp_path,
     win.project_panel.g_parts.child(0).setText(0, "Upstairs")
     assert doc.edits.parts[0].name == "Upstairs"
 
-    # save one part on its own
+    # save one part on its own: the Save As window names the part
     out = str(tmp_path / "upstairs.pcd")
-    monkeypatch.setattr(ap.QFileDialog, "getSaveFileName", lambda *a, **k: (out, ""))
+    seen = {}
+
+    def dialog(parent, title, start, filters, chosen):
+        seen["title"], seen["start"] = title, start
+        return out, chosen
+
+    monkeypatch.setattr(ap.QFileDialog, "getSaveFileName", dialog)
     monkeypatch.setattr(ap.QMessageBox, "information", lambda *a, **k: None)
     win.save_part(doc.edits.parts[0].id)
     _wait(qtbot, win)
     got = read_cloud(out).data
     assert len(got) == int((full["z"] >= h).sum())
+    assert seen["title"] == "Save part: Upstairs"
+    assert os.path.basename(seen["start"]).endswith(" - Upstairs.pcd")
 
     # colour by height draws without the alignment error option
     view.colour_mode.setCurrentIndex(2)
@@ -855,4 +863,37 @@ def test_tool_keys_toggle_in_the_walk_through(window, qtbot, scans):
     qtbot.wait(150)
     qtbot.keyRelease(fly, Qt.Key_W)
     assert not np.allclose(fly.cam.pos, before)
+    win.doc.dirty = False
+
+
+def test_save_as_starts_in_the_last_folder_saved_to(window, qtbot, scans, tmp_path,
+                                                     monkeypatch):
+    """Every export asks where to save, starting where the last one went."""
+    from pcd_merge.gui import save_dialog as sd
+
+    win = window()
+    win.load_paths(scans[:1])
+    _wait(qtbot, win)
+    seen = []
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+
+    def dialog(parent, title, start, filters, chosen=""):
+        seen.append(start)
+        return str(target / os.path.basename(start)), chosen
+
+    monkeypatch.setattr(sd.QFileDialog, "getSaveFileName", dialog)
+    # first time: the scans' folder, with a usable name
+    path, _ = sd.ask_save_path(win, "Save", "Site - above 2.00 m: A.pcd", "PCD (*.pcd)",
+                               doc=win.doc)
+    assert seen[-1] == os.path.join(os.path.dirname(scans[0]), "Site - above 2.00 m A.pcd")
+    # every export after that starts where the last file went
+    win.inspect_panel._export_csv()
+    assert os.path.dirname(seen[-1]) == str(target)
+    assert os.path.isfile(target / "measurements.csv")
+    win.inspect_panel._screenshot_dialog()
+    assert seen[-1] == str(target / "screenshot.png")
+    # a file usually saved in place (adding to a merged cloud) keeps its own path
+    sd.ask_save_path(win, "Save", "x.pcd", "PCD (*.pcd)", suggested=str(tmp_path / "m.pcd"))
+    assert seen[-1] == str(tmp_path / "m.pcd")
     win.doc.dirty = False
