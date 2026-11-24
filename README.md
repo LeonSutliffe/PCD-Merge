@@ -102,7 +102,9 @@ The window has three parts and a row of mode tabs at the top right:
   with the Measure button (tick to show, double-click to rename, right-click to
   delete).
 * **Middle, the 3D view:** orbit, top / front / side, an orthographic option,
-  and **Walk through** (first person) inside the same view.
+  and **Walk through** (first person) inside the same view. **Hide panels**
+  (F11, or *View > Hide side panels*) hides both side panels so the view fills
+  the window; press it again to bring them back.
 * **Right, the settings of the current mode.** **Align** has everything below.
   **Edit** cleans the scans up and splits them (see *Edit mode*). **Inspect** is
   for looking and measuring (see *Measuring*).
@@ -209,13 +211,29 @@ COPC is also offered in the save dialog of every merge. The file is written
 in two passes through a temporary file next to it, so allow about twice its
 uncompressed size (36 bytes a point) of free disk space while it is made.
 
+**Make browser walk-through…** (in Inspect) saves the site as **one `.html`
+file that opens in any web browser** (Chrome, Edge, Firefox, Safari) by
+double-clicking it, straight into a walk-through. It needs no app, no
+internet and no installing, so it can be emailed, put on a USB stick or
+shared with a link to download. Clients can walk around (the same controls as
+the app's walk-through), switch to an **Overview** of the whole site, change
+the colours and the detail, jump to the scan positions and **measure**
+distances (click two points). The measurements shown in the app are included.
+It shows the ticked scans, aligned, without deleted points or hidden parts,
+plus ticked merged clouds, thinned evenly to 2, 5 or 10 million points
+(about 20, 50 or 100 MB; positions kept to under a millimetre). Choose
+*Small* for phones and tablets. Browsers don't let a page opened from a file
+read other files, which is why everything is inside the one file.
+
 ### Walk-through (first person)
 
 Press **Walk through** above the 3D view to walk or fly around inside the scan,
 in the same view (Esc or **Leave walk-through** goes back to orbiting). It shows what the 3D view shows: the
 aligned clouds after **Align** (or their original positions), and only the
 files that are ticked. To walk through a merged file you saved earlier, load
-just that file and press **Walk through**.
+just that file and press **Walk through**. Leaving the walk-through keeps it:
+pressing **Walk through** again goes straight back to where you were, unless
+what is shown has changed.
 
 | | |
 |---|---|
@@ -239,6 +257,19 @@ larger, so they still look solid. Cubes behind you are skipped. While you move,
 the number of points drawn is lowered automatically if the frame rate drops,
 and the full detail comes back as soon as you stop. **Detail** sets how many
 points it aims for; lower it on a slower graphics card.
+
+**Editing and measuring while walking.** Every Edit tool works in the
+walk-through: choose Brush, Rectangle, Lasso, Object or Cut line in the Edit
+panel (or press B, R, L, O) and click or drag in the walk-through; **Delete**,
+**Restore**, *Show deleted points*, Undo / Redo, splitting and parts all show
+there at once. **Measure** (M) works the same way: click two points. With a
+tool chosen, the left button is the tool's and the **right button looks
+around**; if the mouse is captured (click with no tool chosen), the tool acts
+at the cross in the middle of the view. A lasso or rectangle drawn in the
+walk-through stops just past the nearest surface inside it, so a lasso round a
+person does not also take the rooms behind the wall; *Lasso depth* sets a
+fixed depth instead. Esc first drops a half-made measurement or shape, then
+leaves the walk-through.
 
 ### Input formats
 
