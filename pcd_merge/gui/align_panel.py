@@ -34,6 +34,12 @@ from .workers import QuietWorker
 # background jobs
 
 
+def _ext(path: str) -> str:
+    """The file's format extension (".copc.laz" counts as one)."""
+    return ".copc.laz" if path.lower().endswith(".copc.laz") else \
+        os.path.splitext(path)[1].lower()
+
+
 def align_clouds(clouds, settings, previews, quality_ref=None, *, progress):
     """Align, then grade the result.
 
@@ -172,6 +178,11 @@ class AlignPanel(QWidget):
             "other scans in the project are aligned to it and appended when you merge.")
         self.b_base.clicked.connect(self._base_dialog)
         lv.addWidget(self.b_base)
+
+        from .manual_align import ManualAlignBox
+
+        self.manual = ManualAlignBox(self)
+        lv.addWidget(self.manual)
 
         # ---- clean-up: built here (the merge uses it) but shown in Edit mode
         box = self.cleanup_box = QGroupBox("Automatic clean-up (applied when saving)")
@@ -313,10 +324,12 @@ class AlignPanel(QWidget):
         self.b_merge.setEnabled(not busy and aligned)
         self.b_save_tf.setEnabled(not busy and aligned)
         self.b_base.setEnabled(not busy)
+        self.manual.update_buttons(busy)
 
     def scans_changed(self):
         """Scans added or removed: earlier results no longer apply."""
         self._reset_retries()
+        self.manual.scans_changed()
         self.show_result()
         self.cleanup_changed()
 
@@ -434,10 +447,11 @@ class AlignPanel(QWidget):
                               denoise=self.cb_denoise.isChecked(),
                               remove_moving=self.cb_moving.isChecked())
 
-    def merge(self, part=None):
+    def merge(self, part=None, fmt: str | None = None):
         """Merge and save. Points deleted in Edit mode are left out; ``part``
         saves only that part of a split site. One scan on its own can be
-        saved too (cleaned up in Edit), with no alignment."""
+        saved too (cleaned up in Edit), with no alignment. ``fmt`` (such as
+        ".copc.laz") is the format offered first instead of the last one used."""
         doc = self.doc
         result = doc.result
         if result is None and len(doc.scans) != 1:
@@ -475,10 +489,10 @@ class AlignPanel(QWidget):
             if ans != QMessageBox.Yes:
                 return
         export = doc.project.settings.get("export", {})
-        ext = export.get("format", ".pcd")
+        ext = fmt or export.get("format", ".pcd")
         base = doc.base
-        if base is not None:
-            ext = os.path.splitext(base.entry.path)[1].lower()  # keep adding to the same file
+        if base is not None and fmt is None:
+            ext = _ext(base.entry.path)  # keep adding to the same file
             suggested = base.entry.path
         elif doc.project.saved:
             suggested = os.path.join(doc.project.exports_dir, doc.project.name + ext)
@@ -486,17 +500,17 @@ class AlignPanel(QWidget):
             suggested = os.path.join(os.path.dirname(doc.scans[0].entry.path), "merged" + ext)
         filters = file_filter()
         chosen = next((f for f in filters.split(";;") if f.endswith(f"(*{ext})")), "")
-        path, selected = QFileDialog.getSaveFileName(self, "Save merged cloud", suggested,
-                                                     filters, chosen)
+        title = "Save viewing file" if fmt == ".copc.laz" else "Save merged cloud"
+        path, selected = QFileDialog.getSaveFileName(self, title, suggested, filters, chosen)
         if not path:
             return
-        typed = os.path.splitext(path)[1].lower()
+        typed = _ext(path)
         if typed in FORMATS:
             ext = typed
         else:  # no (known) extension typed: use the format picked in the dialog
             ext = next((e for e in FORMATS if selected.endswith(f"(*{e})")), ".pcd")
             path += ext
-        if base is None:
+        if base is None and fmt is None:
             export["format"] = ext
             doc.set_setting("export", dict(export))
         compressed = self.cb_compress.isChecked() and ext == ".pcd"

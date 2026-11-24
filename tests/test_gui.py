@@ -505,3 +505,88 @@ def test_measure_in_every_mode_list_export_and_reopen(window, qtbot, scans, tmp_
     # leaving Inspect stops measuring
     win.modes.setCurrentIndex(0)
     assert view.tool is None and not view.b_measure.isChecked()
+
+
+def test_align_by_hand_from_picked_points(window, qtbot, scans):
+    from PySide6.QtCore import QPoint
+
+    from pcd_merge.gui.view3d import HAVE_GL
+
+    win = window()
+    win.resize(1200, 800)
+    win.load_paths(scans)
+    _wait(qtbot, win)
+    doc, view, box = win.doc, win.view, win.align_panel.manual
+    assert not doc.aligned and box.isEnabled()
+    assert (box.moving.currentIndex(), box.fixed.currentIndex()) == (1, 0)
+    assert not box.b_apply.isEnabled()
+    pose0 = make_transform(0.0, 0.0, (-4, 0, 1.5))
+    pose1 = make_transform(6.0, 0.02, (3, 2, 1.5))
+    truth = np.linalg.inv(pose0) @ pose1  # scan 1 -> scan 0's frame
+
+    if HAVE_GL:
+        win.show()
+        qtbot.waitExposed(win)
+        box.b_pick.click()
+        assert box.picking() and view.only == {0, 1} and box.pick_scan() == 0
+        # a click snaps to the fixed scan only
+        proj, _ = view.project_points(0)
+        mvp = view.camera_mvp()
+        c = mvp @ np.r_[proj[5], 1.0]
+        pos = QPoint(int(round((c[0] / c[3] + 1) / 2 * view.view.width())),
+                     int(round((1 - c[1] / c[3]) / 2 * view.view.height())))
+        qtbot.mouseClick(view.view, Qt.LeftButton, pos=pos)
+        assert len(box.fixed_pts) == 1 and box.pick_scan() == 1
+        box.undo_point()
+        assert not box.fixed_pts
+
+    # spots on scan 0, and the same spots in scan 1's frame, clicked a few cm off
+    s0 = doc.scans[0].sample
+    rng = np.random.default_rng(3)
+    spots = s0[np.argsort(np.linalg.norm(s0[:, :2] - [7, 1], axis=1))[::97][:4]]
+    inv = np.linalg.inv(truth)
+    for p in spots:
+        box.add_pick(p)
+        box.add_pick(p @ inv[:3, :3].T + inv[:3, 3] + rng.normal(0, 0.03, 3))
+    assert box.pairs() == 4 and box.b_apply.isEnabled()
+    assert "agree within" in box.status.text()
+    box.apply()
+    _wait(qtbot, win)
+    assert doc.aligned and doc.quality is not None
+    t1 = doc.transforms()[1]
+    assert np.abs(t1[:3, 3] - truth[:3, 3]).max() < 0.05
+    assert np.abs(t1[:3, :3] - truth[:3, :3]).max() < 0.01
+    assert "placed by hand" in win.align_panel.report.toPlainText()
+    assert not box.picking() and view.only is None and not box.fixed_pts
+    assert win.align_panel.b_merge.isEnabled()
+
+
+def test_make_viewing_file_from_inspect(window, qtbot, scans, tmp_path, monkeypatch):
+    import laspy
+
+    from pcd_merge.gui import align_panel as ap
+
+    win = window()
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    win.modes.setCurrentIndex(2)
+    panel = win.inspect_panel
+    assert panel.b_copc.isEnabled()  # one scan: no alignment needed
+    out = str(tmp_path / "site.copc.laz")
+    seen = {}
+
+    def dialog(_parent, title, _start, _filters, chosen):
+        seen["title"], seen["chosen"] = title, chosen
+        return out, chosen
+
+    monkeypatch.setattr(ap.QFileDialog, "getSaveFileName", dialog)
+    monkeypatch.setattr(ap.QMessageBox, "information", lambda *a, **k: None)
+    panel.b_copc.click()
+    _wait(qtbot, win)
+    assert seen["title"] == "Save viewing file" and "*.copc.laz" in seen["chosen"]
+    with laspy.CopcReader.open(out) as r:
+        assert len(r.query()) == len(read_cloud(scans[0]).data)
+    assert win.doc.project.exports[-1]["path"] == out
+    # the usual merge format is not changed by it
+    assert win.doc.project.settings.get("export", {}).get("format") != ".copc.laz"
+    win.doc.dirty = False

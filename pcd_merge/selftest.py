@@ -77,6 +77,8 @@ def run(log_path: str | None = None) -> int:
             write_cloud(os.path.join(tmp, "merged" + ext), merged)
         for ext in (".las", ".laz"):
             assert len(laspy.read(os.path.join(tmp, "merged" + ext)).points) == len(merged)
+        with laspy.CopcReader.open(os.path.join(tmp, "merged.copc.laz")) as copc:
+            assert len(copc.query()) == len(merged)  # the octree index finds every point
         e57 = pye57.E57(os.path.join(tmp, "merged.e57"))
         assert e57.get_header(0).point_count == len(merged)
         e57.close()

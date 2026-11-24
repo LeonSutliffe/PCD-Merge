@@ -44,6 +44,7 @@ FORMATS = {
     ".las": "LAS (survey / GIS)",
     ".laz": "LAZ (compressed LAS)",
     ".e57": "E57 (scanner exchange)",
+    ".copc.laz": "COPC (cloud-optimised LAZ, for viewers)",
 }
 
 _TIME_FIELDS = ("gps_time", "timestamp", "time", "t")
@@ -57,6 +58,8 @@ def file_filter() -> str:
 
 
 def format_of(path: str) -> str:
+    if path.lower().endswith(".copc.laz"):
+        return ".copc.laz"
     ext = os.path.splitext(path)[1].lower()
     if ext not in FORMATS:
         raise ValueError(f"unsupported output format '{ext or path}'; "
@@ -66,7 +69,7 @@ def format_of(path: str) -> str:
 
 def needs_survey(path: str) -> bool:
     """Whether writing this format needs value ranges before the first point."""
-    return format_of(path) in (".las", ".laz", ".e57")
+    return format_of(path) in (".las", ".laz", ".e57", ".copc.laz")
 
 
 def write_cloud(path: str, data: np.ndarray, compressed: bool = False,
@@ -249,6 +252,8 @@ def open_writer(path: str, dtype: np.dtype, stats: dict | None = None) -> CloudW
         raise ValueError(f"{ext} output needs the value ranges first (see survey())")
     if ext in (".las", ".laz"):
         return _LASWriter(path, tmp, dtype, stats, ext == ".laz")
+    if ext == ".copc.laz":
+        return _COPCWriter(path, path + ".part.laz", dtype, stats)
     return _E57Writer(path, tmp, dtype, stats)
 
 
@@ -482,10 +487,19 @@ class _LASWriter(CloudWriter):
         self.notes = notes
         self.header = header
         self._skipped: set[str] = set()
+        self._open(tmp, compress)
+
+    def _open(self, tmp, compress):
+        import laspy
+
         kw = {"laz_backend": laspy.LazBackend.Lazrs} if compress else {}
-        self.w = laspy.open(tmp, mode="w", header=header, do_compress=compress, **kw)
+        self.w = laspy.open(tmp, mode="w", header=self.header, do_compress=compress, **kw)
 
     def write(self, data):
+        self.w.write_points(self.records(data))
+
+    def records(self, data):
+        """``data`` as LAS point records (laspy), ready to write."""
         import laspy
 
         las = laspy.ScaleAwarePointRecord.zeros(len(data), header=self.header)
@@ -517,7 +531,7 @@ class _LASWriter(CloudWriter):
                 self._skipped.add(low)
         for n, name in self.extra:
             las[n] = data["intensity"].astype(np.float32) if n == "intensity_raw" else cols[name]
-        self.w.write_points(las)
+        return las
 
     def _finish(self):
         self.w.close()
@@ -528,6 +542,37 @@ class _LASWriter(CloudWriter):
 
     def _release(self):
         self.w.close()
+
+
+class _COPCWriter(_LASWriter):
+    """LAZ with the points in octree order and an index: see :mod:`.copc`."""
+
+    def __init__(self, path, tmp, dtype, stats):
+        self._stats = stats
+        super().__init__(path, tmp, dtype, stats, compress=True)
+
+    def _open(self, tmp, compress):
+        from .copc import CopcSpool
+
+        st = self._stats
+        lo = np.array([st[k].lo for k in "xyz"])
+        hi = np.array([st[k].hi for k in "xyz"])
+        self.w = None
+        self.spool = CopcSpool(tmp, self.header, st["_count"], lo, hi)
+
+    def write(self, data):
+        xyz = np.stack([data["x"], data["y"], data["z"]], axis=1).astype(np.float64)
+        self.spool.add(self.records(data), xyz)
+
+    def _finish(self):
+        self.spool.finish(self.tmp)
+        notes = list(self.notes)
+        for low in sorted(self._skipped):
+            notes.insert(0, f"field '{low}' did not fit LAS's '{low}' and was left out")
+        return notes
+
+    def _release(self):
+        self.spool.remove_spool()
 
 
 # --------------------------------------------------------------------------
