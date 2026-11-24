@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.align_panel.load_settings()
         self._update_title()
         self._update_buttons()
+        install_model_mode(self)
 
     # ---------------------------------------------------------------- menus
 
@@ -758,6 +759,17 @@ class MainWindow(QMainWindow):
         self.align_panel.shutdown()
         self.tasks.wait()
         super().closeEvent(e)
+
+
+def install_model_mode(win) -> None:
+    """Model mode (CAD geometry from the scans) is an optional add-on that
+    lives in ``pcd_merge/cad``. Deleting that folder removes it; the app
+    runs on without it (see docs/model-mode.md)."""
+    try:
+        from ..cad.gui import install
+    except ImportError:
+        return
+    install(win)
 
 
 def walk_scene(clouds, transforms, edit_transforms, edits, keys, merged=(), *, progress):

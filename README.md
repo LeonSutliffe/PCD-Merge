@@ -277,6 +277,17 @@ person does not also take the rooms behind the wall; *Lasso depth* sets a
 fixed depth instead. Esc first drops a half-made measurement or shape, then
 leaves the walk-through.
 
+### Model mode (CAD from the scans)
+
+The **Model** tab makes editable CAD geometry from the scans instead of a
+mesh: it finds the building's levels, traces **floor plans and sections** into
+lines (DXF, for any CAD program), and fits **walls, floor slabs, roofs, columns
+and pipes** as simple solids with their real dimensions (IFC for Revit,
+ArchiCAD, FreeCAD and other BIM programs; STEP for Fusion, SolidWorks and other
+mechanical CAD). Measurements snap to the fitted corners, edges and faces. It
+is a self-contained add-on that can be removed; see
+[docs/model-mode.md](docs/model-mode.md).
+
 ### Input formats
 
 | Format | What is read |

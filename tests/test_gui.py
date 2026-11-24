@@ -57,8 +57,9 @@ def _wait(qtbot, win, timeout=120_000):
 
 def test_layout_has_modes_tree_view_and_panels(window):
     win = window()
-    assert [win.modes.tabText(i) for i in range(win.modes.count())] == ["Align", "Edit",
-                                                                         "Inspect"]
+    # (a fourth tab, Model, is the optional add-on in pcd_merge/cad)
+    assert [win.modes.tabText(i) for i in range(win.modes.count())][:3] == ["Align", "Edit",
+                                                                             "Inspect"]
     win.modes.setCurrentIndex(1)
     assert win.right.currentWidget() is win.edit_panel
     win.modes.setCurrentIndex(0)
