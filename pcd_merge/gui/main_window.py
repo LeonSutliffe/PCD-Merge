@@ -34,13 +34,16 @@ from ..project import SUFFIX, ProjectError, from_manifest, is_project, recent_pr
 from ..readers import find_scan_files, input_filter
 from .align_panel import AlignPanel
 from .document import Document, load_clouds, load_files, sample_file, sample_missing
-from .edit_panel import EditPanel
+from .edit_panel import TOOL_KEYS as EDIT_KEYS
+from .edit_panel import TOOL_LABELS, EditPanel
 from .inspect_panel import InspectPanel
 from .project_panel import ProjectPanel
 from .view3d import HAVE_GL, View3D
 from .workers import TaskBar
 
 MODES = ("Align", "Edit", "Inspect")
+# Edit's tools, their names and keys (Measure is M, in the View menu)
+TOOL_KEYS = tuple((k, label, EDIT_KEYS[k]) for k, label, _tip in TOOL_LABELS)
 
 
 class MainWindow(QMainWindow):
@@ -173,9 +176,10 @@ class MainWindow(QMainWindow):
         self.a_select_none = self._action(e, "Select nothing", self.edit_panel.clear_selection,
                                           "Ctrl+D")
         e.addSeparator()
-        for key, label, keys in ((None, "Move the view", "V"), ("brush", "Brush", "B"),
-                                 ("rectangle", "Rectangle", "R"), ("lasso", "Lasso", "L"),
-                                 ("object", "Object", "O")):
+        # One key per tool, also in the walk-through (W A S D, Q E C and Space
+        # move there, so none of those). Pressing a tool's key again turns it
+        # off; from another mode it switches to Edit first.
+        for key, label, keys in TOOL_KEYS:
             self._action(e, f"Tool: {label}", lambda _=False, k=key: self._pick_tool(k), keys)
         self.edit_menu = e
 
@@ -265,8 +269,18 @@ class MainWindow(QMainWindow):
             self.align_panel.merge(part=part)
 
     def _pick_tool(self, key):
-        if self.modes.currentIndex() == 1:
-            self.edit_panel.choose_tool(key)
+        """A tool's key: choose that tool, or turn it off if it is on."""
+        if self.modes.currentIndex() != 1:
+            if key is None:
+                return
+            self.modes.setCurrentIndex(1)  # the tools are Edit's
+        elif key is not None and self.edit_panel.current_tool() == key:
+            key = None  # pressed again: back to just moving
+        self.edit_panel.choose_tool(key)
+        if key is None and self.view.b_measure.isChecked():
+            self.view.b_measure.setChecked(False)  # V also stops measuring
+        name = dict((k, n) for k, n, _ in TOOL_KEYS)[key]
+        self.tasks.set_status(f"Tool: {name}." if key else "No tool: the mouse moves the view.")
 
     def _update_buttons(self, *_):
         busy = self.tasks.busy

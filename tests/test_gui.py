@@ -810,3 +810,49 @@ def test_make_browser_walk_through(window, qtbot, scans, tmp_path, monkeypatch):
     assert text.startswith("<!doctype html>") and '"measurements":[{' in text
     assert "Saved the browser walk-through" in win.tasks.status.text()
     win.doc.dirty = False
+
+
+def test_tool_keys_toggle_in_the_walk_through(window, qtbot, scans):
+    """B R L O X and M choose a tool from the keyboard while walking (from
+    any mode), and pressing the same key again turns it off."""
+    win = window()
+    win.resize(1200, 800)
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    win.show()
+    qtbot.waitExposed(win)
+    win.modes.setCurrentIndex(2)  # Inspect: measuring is on
+    win.walk_through()
+    _wait(qtbot, win)
+    fly = win.view._walk.view
+    win.activateWindow()
+    fly.setFocus()
+    qtbot.waitUntil(fly.hasFocus)
+    name = lambda: fly.tool.name if fly.tool is not None else None  # noqa: E731
+    assert name() == "measure"
+    qtbot.keyClick(fly, Qt.Key_M)  # M: measuring off
+    assert name() is None and not win.view.b_measure.isChecked()
+    qtbot.keyClick(fly, Qt.Key_M)  # and on again
+    assert name() == "measure"
+    qtbot.keyClick(fly, Qt.Key_B)  # B from Inspect: Edit, brush
+    assert win.modes.currentIndex() == 1 and name() == "brush"
+    assert not win.view.b_measure.isChecked()
+    assert "B: tool off" in win.view._walk.help.text()
+    qtbot.keyClick(fly, Qt.Key_B)  # B again: off
+    assert name() is None and win.edit_panel.current_tool() is None
+    for key, tool in ((Qt.Key_R, "rectangle"), (Qt.Key_L, "lasso"), (Qt.Key_O, "object"),
+                      (Qt.Key_X, "cut")):
+        qtbot.keyClick(fly, key)
+        assert name() == tool
+    qtbot.keyClick(fly, Qt.Key_M)  # measuring replaces the cut line
+    assert name() == "measure"
+    qtbot.keyClick(fly, Qt.Key_V)  # V: just move
+    assert name() is None
+    assert win.view.walking  # none of it left the walk-through
+    # W still walks
+    before = fly.cam.pos.copy()
+    qtbot.keyPress(fly, Qt.Key_W)
+    qtbot.wait(150)
+    qtbot.keyRelease(fly, Qt.Key_W)
+    assert not np.allclose(fly.cam.pos, before)
+    win.doc.dirty = False
