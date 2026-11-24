@@ -427,7 +427,8 @@ class FlyThroughWindow(QWidget):
     ``on_exit``, a panel embedded in the main window's 3D view (Esc and the
     "Leave" button call ``on_exit``)."""
 
-    def __init__(self, scene: Scene, title: str = "Fly-through", parent=None, on_exit=None):
+    def __init__(self, scene: Scene, title: str = "Fly-through", parent=None, on_exit=None,
+                 on_panels=None):
         super().__init__(parent, Qt.Widget if on_exit else Qt.Window)
         self.embedded = on_exit is not None
         self.on_gl_failed = None  # embedded: called with the error if OpenGL fails
@@ -502,6 +503,14 @@ class FlyThroughWindow(QWidget):
             b_leave.setToolTip("Back to the orbit view (Esc)")
             b_leave.clicked.connect(on_exit)
             top.addWidget(b_leave)
+        self.b_panels = None
+        if on_panels is not None:  # hide the main window's side panels: a bigger view
+            self.b_panels = QPushButton("Hide panels")
+            self.b_panels.setCheckable(True)
+            self.b_panels.setToolTip("Hide the project list and the settings so the view "
+                                     "fills the window (F11).")
+            self.b_panels.toggled.connect(lambda on: (on_panels(on), self.view.setFocus()))
+            top.addWidget(self.b_panels)
         lay.addLayout(top)
 
         self.view = FlyView(scene, self, on_status=self._status)
@@ -529,6 +538,12 @@ class FlyThroughWindow(QWidget):
         self._status(self.view)
         QTimer.singleShot(0, self.view.setFocus)
         QTimer.singleShot(500, self._check_error)
+
+    def resume(self, pos, yaw, pitch, speed):
+        """Go back to where a previous walk through this scene was left."""
+        self.view.go_to(pos, yaw, pitch)
+        self.view.set_speed(speed)
+        self.sync_speed()
 
     def sync_speed(self):
         self.speed.blockSignals(True)

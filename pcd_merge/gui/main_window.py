@@ -73,6 +73,9 @@ class MainWindow(QMainWindow):
         split.setSizes([280, 760, 400])
         split.setChildrenCollapsible(False)
         self.setCentralWidget(split)
+        self.split = split
+        self._walk_key = None  # what the kept walk-through scene was made from
+        self._walk_scene = None
 
         self.modes = QTabBar()
         for m in MODES:
@@ -106,6 +109,7 @@ class MainWindow(QMainWindow):
         self.view.walk_requested.connect(self.walk_through)
         self.view.selection_changed.connect(self._update_buttons)
         self.view.measure_toggled.connect(self._measure_toggled)
+        self.view.panels_toggled.connect(self.set_panels_hidden)
         self.view.walk_fallback.connect(lambda err: self.tasks.set_status(
             "The walk-through opened in a window of its own (it could not be drawn inside "
             f"this one: {err})."))
@@ -181,6 +185,10 @@ class MainWindow(QMainWindow):
             self._action(v, f"{name} view", lambda _=False, i=k: (
                 self.view.camera.setCurrentIndex(i), self.view._camera_preset()), f"Ctrl+{k}")
         self.a_walk = self._action(v, "Walk through", self.walk_through, "Ctrl+W")
+        self.a_panels = self._action(v, "Hide side panels", lambda on: self.set_panels_hidden(on),
+                                     "F11", "Hide the project list and the settings so the "
+                                     "3D view fills the window (F11 again to show them).")
+        self.a_panels.setCheckable(True)
         self.a_measure = self._action(v, "Measure", lambda: self.view.b_measure.click(), "M",
                                       "Click two points for a distance, or one for its "
                                       "coordinates (in every mode).")
@@ -237,6 +245,20 @@ class MainWindow(QMainWindow):
         else:
             self.view.set_tool(None)
 
+    def set_panels_hidden(self, hidden: bool) -> None:
+        """Hide (or show again) the project list and the mode's settings, so
+        the 3D view gets the whole width of the window."""
+        hidden = bool(hidden)
+        self.project_panel.setVisible(not hidden)
+        self.right.setVisible(not hidden)
+        self.a_panels.blockSignals(True)
+        self.a_panels.setChecked(hidden)
+        self.a_panels.blockSignals(False)
+        self.view.set_panels_hidden(hidden)
+
+    def panels_hidden(self) -> bool:
+        return self.right.isHidden()
+
     def save_part(self, part_id: str):
         part = self.doc.part(part_id)
         if part is not None:
@@ -263,12 +285,16 @@ class MainWindow(QMainWindow):
         for a in (self.a_add, self.a_folder):
             a.setEnabled(not busy)
         self.a_walk.setEnabled(not busy and bool(self.doc.scans) and HAVE_GL)
+        if not busy:  # a walk-through being prepared was cancelled, or failed
+            self.view.set_walk_preparing(False)
         self.a_measure.setEnabled(bool(self.doc.scans) and HAVE_GL)
         self.a_copy.setEnabled(not busy and self.doc.project.saved and bool(self.doc.scans))
         self.a_clear_cache.setEnabled(self.doc.project.saved)
         self.a_close.setEnabled(not busy and (self.doc.project.saved or bool(self.doc.scans)))
 
     def _doc_changed(self, what):
+        if what in ("scans", "project"):
+            self.forget_walk()
         if what == "scans":
             self.view.leave_walk()
             self.edit_panel.clear_selection()
@@ -443,11 +469,36 @@ class MainWindow(QMainWindow):
             return
         aligned = self.view.aligned_shown()
         tfs = doc.transforms()
-        self.with_clouds(lambda: self._walk_now(shown, aligned, tfs, merged), shown)
+        key = self._walk_inputs(shown, aligned, tfs, merged)
+        if key == self._walk_key and self._walk_scene is not None:
+            # nothing changed since the last walk: back in at once, where it was left
+            self._walk_ready(self._walk_scene, self._walk_title)
+            return
+        self.view.set_walk_preparing(True)
+        self.with_clouds(lambda: self._walk_now(shown, aligned, tfs, merged, key), shown)
 
-    def _walk_now(self, shown, aligned, tfs, merged=()):
-        import numpy as np
+    def _walk_inputs(self, shown, aligned, tfs, merged):
+        """What the walk-through scene is made from: while none of it changes,
+        the scene is kept and re-used (building it can take minutes)."""
+        doc = self.doc
 
+        def stamp(path):
+            try:
+                st = os.stat(path)
+                return path, st.st_mtime, st.st_size
+            except OSError:
+                return path, None, None
+
+        return (tuple(doc.scans[i].entry.key for i in shown), aligned,
+                tuple(tfs[i].tobytes() for i in shown) if aligned else (),
+                tuple(stamp(p) for p in merged), doc.edit_version)
+
+    def forget_walk(self) -> None:
+        """Drop the kept walk-through scene (it can be hundreds of MB)."""
+        self._walk_key = self._walk_scene = None
+        self.view.forget_walk()
+
+    def _walk_now(self, shown, aligned, tfs, merged=(), key=None):
         clouds = [self.doc.scans[i].cloud for i in shown]
         transforms = [tfs[i] if aligned else np.eye(4) for i in shown]
         names = [c.name for c in clouds] + [os.path.basename(p) for p in merged]
@@ -455,11 +506,17 @@ class MainWindow(QMainWindow):
                  + (f" and {len(names) - 3} more" if len(names) > 3 else ""))
         edits = self.doc.edit_snapshot()
         keys = [self.doc.scans[i].entry.key for i in shown]
+
+        def done(scene):
+            self._walk_key, self._walk_scene, self._walk_title = key, scene, title
+            self._walk_ready(scene, title)
+
         self.tasks.run(walk_scene, (clouds, transforms, [tfs[i] for i in shown], edits, keys,
                                     list(merged)),
-                       lambda scene: self._walk_ready(scene, title), "Preparing walk-through…")
+                       done, "Preparing walk-through…")
 
     def _walk_ready(self, scene, title):
+        self.view.set_walk_preparing(False)
         self.view.show_walk(scene, title)
         if self.view.walking:  # (otherwise it opened in its own window, which says so)
             self.tasks.set_status("Walk-through: click into the view, then use W A S D and "

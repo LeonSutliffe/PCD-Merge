@@ -40,6 +40,7 @@ class View3D(QWidget):
     selection_changed = Signal()
     measure_toggled = Signal(bool)  # the Measure button
     tool_changed = Signal()
+    panels_toggled = Signal(bool)  # the Hide panels button: hide the side panels
 
     NAV_HINT = "Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom"
 
@@ -49,6 +50,9 @@ class View3D(QWidget):
         self._items = []
         self._removed = None  # per scan: mask of preview points kept by the clean-up
         self._walk = None
+        self._walk_resume = None  # (scene, camera position, yaw, pitch, speed) of the last walk
+        self._walk_preparing = False
+        self.panels_hidden = False
         self._ortho = False
         self.removed_hidden = False  # clean-up preview: hide removed points instead of white
         # Edit mode
@@ -141,6 +145,12 @@ class View3D(QWidget):
             "to come back). Shows the scans as here: aligned or in their original positions.")
         self.b_walk.clicked.connect(self.walk_requested)
         top.addWidget(self.b_walk)
+        self.b_panels = QPushButton("Hide panels")
+        self.b_panels.setCheckable(True)
+        self.b_panels.setToolTip("Hide the project list and the settings so the 3D view fills "
+                                 "the window (F11).")
+        self.b_panels.toggled.connect(self.panels_toggled)
+        top.addWidget(self.b_panels)
         lay.addWidget(self.toolbar)
 
         # ---- the view itself: orbit, or the walk-through
@@ -218,6 +228,8 @@ class View3D(QWidget):
                 or (k == 4 and not have["rgb"]):
             self.colour_mode.setCurrentIndex(0)
         self.b_walk.setEnabled(not busy and bool(doc.scans) and HAVE_GL)
+        self.b_walk.setText("Preparing walk-through…" if self._walk_preparing and busy
+                            else "Walk through")
         self.b_measure.setEnabled(bool(doc.scans) and HAVE_GL)
 
     def show_aligned(self, heat: bool | None = None):
@@ -629,13 +641,33 @@ class View3D(QWidget):
 
     # ---------------------------------------------------------------- walk-through
 
+    def set_walk_preparing(self, on: bool) -> None:
+        """Say on the Walk through button that the walk-through is being made
+        (it is greyed out meanwhile; Cancel at the bottom stops it)."""
+        self._walk_preparing = bool(on)
+        busy = on or not self.b_walk.isEnabled()
+        self.b_walk.setText("Preparing walk-through…" if on and busy else "Walk through")
+
+    def set_panels_hidden(self, hidden: bool) -> None:
+        self.panels_hidden = bool(hidden)
+        for b in [self.b_panels] + ([self._walk.b_panels] if self._walk is not None
+                                    and getattr(self._walk, "b_panels", None) else []):
+            b.blockSignals(True)
+            b.setChecked(self.panels_hidden)
+            b.setText("Show panels" if self.panels_hidden else "Hide panels")
+            b.blockSignals(False)
+
     def show_walk(self, scene, title: str):
         from ..flythrough import FlyThroughWindow
 
         self.leave_walk()
         try:
-            self._walk = FlyThroughWindow(scene, title, parent=self, on_exit=self.leave_walk)
+            self._walk = FlyThroughWindow(scene, title, parent=self, on_exit=self.leave_walk,
+                                          on_panels=self.panels_toggled.emit)
             self._walk.on_gl_failed = lambda err: self._walk_in_window(scene, title, err)
+            r = self._walk_resume
+            if r is not None and r[0] is scene:  # back in where it was left
+                self._walk.resume(*r[1:])
             self.stack.addWidget(self._walk)
             self.stack.setCurrentWidget(self._walk)
         except Exception as e:  # pragma: no cover - depends on the graphics driver
@@ -644,6 +676,7 @@ class View3D(QWidget):
             return
         self.toolbar.hide()
         self.bottom.hide()
+        self.set_panels_hidden(self.panels_hidden)
 
     def _walk_in_window(self, scene, title, error: str):
         """Fallback: the walk-through in a window of its own (as before 0.9)."""
@@ -658,12 +691,19 @@ class View3D(QWidget):
         if self._walk is None:
             return
         w, self._walk = self._walk, None
+        cam = w.view.cam
+        self._walk_resume = (w.scene, cam.pos.copy(), cam.yaw, cam.pitch, w.view.speed)
         w.view.release_gl()
         self.stack.setCurrentIndex(0)
         self.stack.removeWidget(w)
         w.deleteLater()
         self.toolbar.show()
         self.bottom.show()
+
+    def forget_walk(self):
+        """The kept walk-through is out of date: leave it and forget it."""
+        self.leave_walk()
+        self._walk_resume = None
 
 
 class _Overlay(QWidget):

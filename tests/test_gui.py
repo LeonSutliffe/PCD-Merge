@@ -590,3 +590,70 @@ def test_make_viewing_file_from_inspect(window, qtbot, scans, tmp_path, monkeypa
     # the usual merge format is not changed by it
     assert win.doc.project.settings.get("export", {}).get("format") != ".copc.laz"
     win.doc.dirty = False
+
+
+def test_walk_through_is_kept_and_panels_can_be_hidden(window, qtbot, scans):
+    """Leaving the walk-through (to measure, say) and coming back must not
+    build it again, and must come back where it was left."""
+    from pcd_merge.gui import main_window as mw
+
+    win = window()
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    built = []
+    real = mw.walk_scene
+
+    def counting(*a, **k):
+        built.append(1)
+        return real(*a, **k)
+
+    mw.walk_scene = counting
+    try:
+        win.walk_through()
+        assert win.view.b_walk.text().startswith("Preparing")
+        _wait(qtbot, win)
+        assert win.view.walking and len(built) == 1
+        assert win.view.b_walk.text() == "Walk through"
+        fly = win.view._walk.view
+        fly.go_to([1.0, 2.0, 3.0], 45.0, -10.0)
+        win.view.leave_walk()
+        # a measurement does not change the scene
+        from pcd_merge.measure import Measurement
+        win.doc.add_measurement(Measurement("point", [[0, 0, 0]]))
+        assert not win.tasks.busy and win.view.b_walk.isEnabled()
+        win.walk_through()
+        assert win.view.walking and len(built) == 1 and not win.tasks.busy
+        cam = win.view._walk.view.cam
+        assert np.allclose(cam.pos, [1, 2, 3]) and cam.yaw == pytest.approx(45.0)
+        win.view.leave_walk()
+        # a change to what is shown builds it again
+        win.doc.edit_version += 1
+        win.walk_through()
+        _wait(qtbot, win)
+        assert len(built) == 2
+    finally:
+        mw.walk_scene = real
+
+    # cancelling the preparation puts the button back
+    win.view.leave_walk()
+    win.doc.edit_version += 1
+    win.walk_through()
+    win.tasks.cancel()
+    _wait(qtbot, win)
+    assert win.view.b_walk.text() == "Walk through"
+
+    # hide the side panels for a bigger view, from the menu or either button
+    win.a_panels.trigger()
+    assert win.right.isHidden() and win.project_panel.isHidden()
+    assert win.view.b_panels.isChecked() and win.view.b_panels.text() == "Show panels"
+    win.view.b_panels.click()
+    assert not win.right.isHidden() and not win.a_panels.isChecked()
+    win.walk_through()
+    _wait(qtbot, win)
+    if win.view.walking:
+        win.view._walk.b_panels.click()
+        assert win.right.isHidden() and win.a_panels.isChecked()
+        win.view.leave_walk()
+        assert win.view.b_panels.isChecked()
+    win.set_panels_hidden(False)
+    win.doc.dirty = False
