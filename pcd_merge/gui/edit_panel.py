@@ -265,8 +265,14 @@ class EditPanel(QWidget):
     def grow_at(self, seed, add: bool = False, points=None) -> None:
         """Select the object at ``seed``, grown over ``points`` (project
         frame; default: the points drawn in the orbit view)."""
-        xyz = self.view.object_points(seed) if points is None else points
-        region = grow_object(xyz, seed)
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            xyz = self.view.object_points(seed) if points is None else points
+            region = grow_object(xyz, seed)
+        finally:
+            QApplication.restoreOverrideCursor()
         if not len(region.keys):
             self.win.tasks.set_status("No object found there.")
             return

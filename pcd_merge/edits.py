@@ -462,8 +462,14 @@ def grow_object(xyz: np.ndarray, seed: np.ndarray, cell: float | None = None,
     face, edge and corner neighbours, at most ``max_radius`` from the seed.
     """
     seed = np.asarray(seed, float)
-    near = np.linalg.norm(xyz - seed, axis=1) <= max_radius
+    d = xyz - seed
+    near = np.einsum("ij,ij->i", d, d) <= max_radius * max_radius
     pts = xyz[near]
+    if len(pts) > GROW_POINTS:
+        # The walk-through has millions of points near the click: a random
+        # part of them finds the same object (the result is a region of
+        # cells, which then takes every point inside) in a fraction of the time.
+        pts = pts[np.random.default_rng(0).random(len(pts)) < GROW_POINTS / len(pts)]
     if not len(pts):
         return Voxels(cell or 0.05, seed, np.zeros(0, np.int64))
     if cell is None:
@@ -483,17 +489,31 @@ def grow_object(xyz: np.ndarray, seed: np.ndarray, cell: float | None = None,
         if max(abs(v) for v in start) > 2:
             return Voxels(cell, origin, np.zeros(0, np.int64))
     limit = int(np.ceil(max_radius / cell))
-    steps = [d for d in itertools.product((-1, 0, 1), repeat=3) if d != (0, 0, 0)]
-    seen = {start}
-    todo = [start]
-    while todo:
-        c = todo.pop()
-        for d in steps:
-            n = (c[0] + d[0], c[1] + d[1], c[2] + d[2])
-            if n in occupied and n not in seen and max(abs(v) for v in n) <= limit:
-                seen.add(n)
-                todo.append(n)
-    return Voxels(cell, origin, pack_keys(np.array(list(seen), dtype=np.int64)))
+    occ = np.unique(ijk, axis=0)
+    occ = occ[np.abs(occ).max(axis=1) <= limit]
+    seen = _flood(pack_keys(occ), pack_keys(np.array([start], dtype=np.int64)))
+    return Voxels(cell, origin, seen)
+
+
+GROW_POINTS = 250_000  # points grow-to-object looks at, at most
+_STEPS = np.array([d for d in itertools.product((-1, 0, 1), repeat=3) if d != (0, 0, 0)],
+                  dtype=np.int64)
+
+
+def _flood(occupied: np.ndarray, start: np.ndarray) -> np.ndarray:
+    """Packed cells reachable from ``start`` through occupied cells (face,
+    edge and corner neighbours), a whole layer at a time."""
+    occupied = np.unique(occupied)
+    seen = np.unique(start)
+    front = seen
+    while len(front):
+        ijk = unpack_keys(front)
+        nb = pack_keys((ijk[:, None, :] + _STEPS[None]).reshape(-1, 3))
+        nb = np.unique(nb)
+        nb = nb[np.isin(nb, occupied, assume_unique=True)]
+        front = nb[~np.isin(nb, seen, assume_unique=True)]
+        seen = np.union1d(seen, front)
+    return seen
 
 
 def _auto_cell(pts: np.ndarray) -> float:
@@ -511,8 +531,16 @@ def _spacing(pts: np.ndarray) -> float:
     except ImportError:  # SciPy is optional: Open3D can do it too
         import open3d as o3d
 
+        # nearest neighbours of a sample only (all of them took most of the time)
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
-        s = float(np.median(np.asarray(pc.compute_nearest_neighbor_distance())))
+        tree = o3d.geometry.KDTreeFlann(pc)
+        idx = np.random.default_rng(0).choice(len(pts), min(len(pts), 2000), False)
+        d = []
+        for i in idx:
+            k, nn, dist2 = tree.search_knn_vector_3d(pc.points[int(i)], 2)
+            if k == 2:
+                d.append(np.sqrt(dist2[1]))
+        s = float(np.median(d)) if d else 0.0
     return max(s, 1e-4)
 
 

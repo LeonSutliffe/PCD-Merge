@@ -199,3 +199,29 @@ def test_union_of_regions():
     s = Sphere([1, 1, 1], 1)
     assert union([s]) is s
     assert not Union([]).mask(xyz).any()
+
+
+def test_grow_object_in_a_dense_cloud_is_quick():
+    """The walk-through hands grow-to-object millions of points near the
+    click: it looks at a sample, so it stays quick, and still finds the
+    whole object without the floor or wall."""
+    import time
+
+    from pcd_merge.edits import GROW_POINTS, grow_object
+
+    rng = np.random.default_rng(0)
+    n = 1_200_000
+    floor = np.c_[rng.uniform(-8, 8, n // 2), rng.uniform(-8, 8, n // 2),
+                  rng.normal(0, 0.003, n // 2)]
+    wall = np.c_[rng.uniform(-8, 8, n // 2), np.full(n // 2, 3.0), rng.uniform(0, 3, n // 2)]
+    box = rng.uniform([1, 1, 0], [1.6, 1.5, 0.9], (100_000, 3))
+    xyz = np.concatenate([floor, wall, box])
+    assert len(xyz) > 4 * GROW_POINTS
+    grow_object(xyz[:5000], box[0])  # (imports)
+    t = time.perf_counter()
+    region = grow_object(xyz, np.array([1.3, 1.2, 0.9]))
+    took = time.perf_counter() - t
+    m = region.mask(xyz)
+    assert m[-len(box):].mean() > 0.9
+    assert m[:n].mean() < 0.001  # floor and wall stay
+    assert took < 10  # (was several seconds for this many points; now well under one)
