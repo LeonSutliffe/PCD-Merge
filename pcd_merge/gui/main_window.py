@@ -73,6 +73,9 @@ class MainWindow(QMainWindow):
         split.setSizes([280, 760, 400])
         split.setChildrenCollapsible(False)
         self.setCentralWidget(split)
+        self.split = split
+        self._walk_key = None  # what the kept walk-through scene was made from
+        self._walk_scene = None
 
         self.modes = QTabBar()
         for m in MODES:
@@ -106,6 +109,7 @@ class MainWindow(QMainWindow):
         self.view.walk_requested.connect(self.walk_through)
         self.view.selection_changed.connect(self._update_buttons)
         self.view.measure_toggled.connect(self._measure_toggled)
+        self.view.panels_toggled.connect(self.set_panels_hidden)
         self.view.walk_fallback.connect(lambda err: self.tasks.set_status(
             "The walk-through opened in a window of its own (it could not be drawn inside "
             f"this one: {err})."))
@@ -181,6 +185,10 @@ class MainWindow(QMainWindow):
             self._action(v, f"{name} view", lambda _=False, i=k: (
                 self.view.camera.setCurrentIndex(i), self.view._camera_preset()), f"Ctrl+{k}")
         self.a_walk = self._action(v, "Walk through", self.walk_through, "Ctrl+W")
+        self.a_panels = self._action(v, "Hide side panels", lambda on: self.set_panels_hidden(on),
+                                     "F11", "Hide the project list and the settings so the "
+                                     "3D view fills the window (F11 again to show them).")
+        self.a_panels.setCheckable(True)
         self.a_measure = self._action(v, "Measure", lambda: self.view.b_measure.click(), "M",
                                       "Click two points for a distance, or one for its "
                                       "coordinates (in every mode).")
@@ -237,6 +245,20 @@ class MainWindow(QMainWindow):
         else:
             self.view.set_tool(None)
 
+    def set_panels_hidden(self, hidden: bool) -> None:
+        """Hide (or show again) the project list and the mode's settings, so
+        the 3D view gets the whole width of the window."""
+        hidden = bool(hidden)
+        self.project_panel.setVisible(not hidden)
+        self.right.setVisible(not hidden)
+        self.a_panels.blockSignals(True)
+        self.a_panels.setChecked(hidden)
+        self.a_panels.blockSignals(False)
+        self.view.set_panels_hidden(hidden)
+
+    def panels_hidden(self) -> bool:
+        return self.right.isHidden()
+
     def save_part(self, part_id: str):
         part = self.doc.part(part_id)
         if part is not None:
@@ -263,12 +285,16 @@ class MainWindow(QMainWindow):
         for a in (self.a_add, self.a_folder):
             a.setEnabled(not busy)
         self.a_walk.setEnabled(not busy and bool(self.doc.scans) and HAVE_GL)
+        if not busy:  # a walk-through being prepared was cancelled, or failed
+            self.view.set_walk_preparing(False)
         self.a_measure.setEnabled(bool(self.doc.scans) and HAVE_GL)
         self.a_copy.setEnabled(not busy and self.doc.project.saved and bool(self.doc.scans))
         self.a_clear_cache.setEnabled(self.doc.project.saved)
         self.a_close.setEnabled(not busy and (self.doc.project.saved or bool(self.doc.scans)))
 
     def _doc_changed(self, what):
+        if what in ("scans", "project"):
+            self.forget_walk()
         if what == "scans":
             self.view.leave_walk()
             self.edit_panel.clear_selection()
@@ -279,11 +305,13 @@ class MainWindow(QMainWindow):
             self.view.redraw()
             self.edit_panel.refresh()
         elif what == "parts":
+            self.view.walk_edits_changed()
             self.edit_panel.refresh()
         elif what == "measurements":
             self.view.draw_measurements()
             self.inspect_panel.refresh()
         elif what == "edits":
+            self.view.walk_edits_changed()
             self.edit_panel.edits_changed()
             self.align_panel.update_cleanup_summary()
         elif what == "project":
@@ -443,11 +471,38 @@ class MainWindow(QMainWindow):
             return
         aligned = self.view.aligned_shown()
         tfs = doc.transforms()
-        self.with_clouds(lambda: self._walk_now(shown, aligned, tfs, merged), shown)
+        key = self._walk_inputs(shown, aligned, tfs, merged)
+        if key == self._walk_key and self._walk_scene is not None:
+            # nothing changed since the last walk: back in at once, where it was left
+            self._walk_ready(self._walk_scene, self._walk_title)
+            return
+        self.view.set_walk_preparing(True)
+        self.with_clouds(lambda: self._walk_now(shown, aligned, tfs, merged, key), shown)
 
-    def _walk_now(self, shown, aligned, tfs, merged=()):
-        import numpy as np
+    def _walk_inputs(self, shown, aligned, tfs, merged):
+        """What the walk-through scene is made from: while none of it changes,
+        the scene is kept and re-used (building it can take minutes)."""
+        doc = self.doc
 
+        def stamp(path):
+            try:
+                st = os.stat(path)
+                return path, st.st_mtime, st.st_size
+            except OSError:
+                return path, None, None
+
+        return (tuple(doc.scans[i].entry.key for i in shown), aligned,
+                tuple(tfs[i].tobytes() for i in shown) if aligned else (),
+                tuple(stamp(p) for p in merged),
+                # original positions of aligned scans leave deleted points out
+                doc.edit_version if doc.aligned and not aligned else None)
+
+    def forget_walk(self) -> None:
+        """Drop the kept walk-through scene (it can be hundreds of MB)."""
+        self._walk_key = self._walk_scene = None
+        self.view.forget_walk()
+
+    def _walk_now(self, shown, aligned, tfs, merged=(), key=None):
         clouds = [self.doc.scans[i].cloud for i in shown]
         transforms = [tfs[i] if aligned else np.eye(4) for i in shown]
         names = [c.name for c in clouds] + [os.path.basename(p) for p in merged]
@@ -455,15 +510,81 @@ class MainWindow(QMainWindow):
                  + (f" and {len(names) - 3} more" if len(names) > 3 else ""))
         edits = self.doc.edit_snapshot()
         keys = [self.doc.scans[i].entry.key for i in shown]
+
+        def done(scene):
+            # edits and measurements live in the project frame (aligned)
+            scene.project_frame = aligned or not self.doc.aligned
+            self._walk_key, self._walk_scene, self._walk_title = key, scene, title
+            self._walk_ready(scene, title)
+
         self.tasks.run(walk_scene, (clouds, transforms, [tfs[i] for i in shown], edits, keys,
                                     list(merged)),
-                       lambda scene: self._walk_ready(scene, title), "Preparing walk-through…")
+                       done, "Preparing walk-through…")
 
     def _walk_ready(self, scene, title):
+        self.view.set_walk_preparing(False)
         self.view.show_walk(scene, title)
         if self.view.walking:  # (otherwise it opened in its own window, which says so)
             self.tasks.set_status("Walk-through: click into the view, then use W A S D and "
                                   "the mouse. Esc or Leave walk-through to go back.")
+
+    # ---------------------------------------------------------------- browser walk-through
+
+    def make_browser_walk(self, max_points: int, path: str | None = None):
+        """Save a walk-through that opens in a web browser (webview.py): the
+        ticked scans, aligned, without deleted points, plus ticked merged
+        clouds, and the visible measurements."""
+        doc = self.doc
+        if self.tasks.busy:
+            QMessageBox.information(self, "PCD Merge", "Something is still running (see the "
+                                    "bottom of the window). Try again when it has finished.")
+            return
+        shown = [i for i, s in enumerate(doc.scans) if s.entry.visible]
+        merged = [e["path"] for e in doc.project.exports
+                  if e.get("visible") and os.path.isfile(e["path"])]
+        if not shown and not merged:
+            QMessageBox.information(self, "PCD Merge", "Tick at least one scan or merged cloud "
+                                    "in the list on the left: the browser walk-through shows "
+                                    "what is ticked.")
+            return
+        if path is None:
+            folder = doc.project.folder if doc.project.saved else ""
+            start = os.path.join(folder, f"{doc.project.name} walk-through.html")
+            path, _ = QFileDialog.getSaveFileName(self, "Save browser walk-through", start,
+                                                  "Web page (*.html)")
+            if not path:
+                return
+            if not path.lower().endswith((".html", ".htm")):
+                path += ".html"
+        tfs = doc.transforms()
+        title = doc.project.name or "Walk-through"
+        measurements = [m for m in doc.measurements if m.visible]
+
+        def run():
+            from ..webview import browser_walk_job
+
+            clouds = [doc.scans[i].cloud for i in shown]
+            self.tasks.run(browser_walk_job,
+                           (clouds, [tfs[i] for i in shown], doc.edit_snapshot(),
+                            [doc.scans[i].entry.key for i in shown], merged, path, max_points,
+                            title, measurements, __version__),
+                           self._browser_walk_done, "Making the browser walk-through…")
+
+        self.with_clouds(run, shown)
+
+    def _browser_walk_done(self, payload):
+        path, size, points = payload
+        self.tasks.set_status(f"Saved the browser walk-through ({points / 1e6:.1f} million points, "
+                              f"{size / 1e6:.0f} MB) to {path}")
+        box = QMessageBox(QMessageBox.Information, "Browser walk-through",
+                          f"Saved {os.path.basename(path)} ({size / 1e6:.0f} MB).\n\n"
+                          "Double-click it to open it in a web browser, or send it to anyone: "
+                          "it needs no app and no internet.", parent=self)
+        b_open = box.addButton("Open it now", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is b_open:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     # ---------------------------------------------------------------- projects
 
@@ -626,10 +747,17 @@ class MainWindow(QMainWindow):
 
 
 def walk_scene(clouds, transforms, edit_transforms, edits, keys, merged=(), *, progress):
-    """The walk-through's scene, without the points deleted in Edit mode.
-    ``merged`` are merged clouds shown in the view (files, already in the
-    project frame), walked through with the scans."""
-    if edits is not None:
+    """The walk-through's scene. Deleted points and hidden parts are not
+    left out but hidden (:class:`~pcd_merge.flyscene.SceneEdits`), so edits
+    made, undone or restored while walking show at once. ``merged`` are
+    merged clouds shown in the view (files, already in the project frame),
+    walked through with the scans; edits don't apply to them."""
+    from ..flyscene import SceneEdits
+
+    same_frame = all(np.allclose(a, b) for a, b in zip(transforms, edit_transforms))
+    if edits is not None and not same_frame:
+        # Original positions of aligned scans: the edits (project frame) are
+        # not where these points are drawn, so leave the points out as before.
         from ..edits import filter_clouds
 
         progress("Leaving out deleted points", 0.0)
@@ -646,7 +774,14 @@ def walk_scene(clouds, transforms, edit_transforms, edits, keys, merged=(), *, p
             clouds.append(read_cloud(path, progress=lambda f, m=msg, k=k: progress(
                 m, 0.3 * (k + f) / len(merged))))
             transforms.append(np.eye(4))
-    return build_scene(clouds, transforms, progress=progress)
+    scene = build_scene(clouds, transforms, progress=progress)
+    scene.scan_keys = list(keys) + [None] * len(merged)
+    if same_frame:
+        progress("Applying the edits", 0.97)
+        scene.edits = SceneEdits(scene)
+        scene.edits.update(edits)
+        scene.edits.apply()
+    return scene
 
 
 def _in_parts(cloud, t, parts):

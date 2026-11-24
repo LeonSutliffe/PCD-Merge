@@ -113,6 +113,12 @@ def run(log_path: str | None = None) -> int:
         log(f"walk-through ok: {len(fly.scene):,} points, "
             f"{len(fly.scene.scan_positions)} scan positions")
         fly.close()
+
+        from .webview import build_web_scene, write_page
+
+        size = write_page(os.path.join(tmp, "walk.html"),
+                          build_web_scene(clouds, r.transforms, 50_000), "self-test")
+        log(f"browser walk-through ok: {size / 1e6:.1f} MB")
         del app
         ok = True
     except Exception:

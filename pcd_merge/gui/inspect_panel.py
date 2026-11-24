@@ -121,6 +121,32 @@ class InspectPanel(QWidget):
         self.b_copc.clicked.connect(lambda: self.win.align_panel.merge(fmt=".copc.laz"))
         gl_.addWidget(self.b_copc)
         lay.addWidget(g)
+
+        # ---- browser walk-through
+        g = QGroupBox("Browser walk-through")
+        gl_ = QVBoxLayout(g)
+        note = QLabel("One .html file that opens in any web browser by double-clicking it, "
+                      "straight into a walk-through: no app, no internet and nothing to "
+                      "install. Clients can walk around, look at an overview and measure. "
+                      "It holds a thinned copy of the points (as the app's walk-through "
+                      "does), the measurements shown here, and leaves out deleted points.")
+        note.setWordWrap(True)
+        note.setStyleSheet(HINT_STYLE)
+        gl_.addWidget(note)
+        from ..webview import DEFAULT_SIZE, SIZES
+
+        self.web_size = QComboBox()
+        for name in SIZES:
+            self.web_size.addItem(name)
+        self.web_size.setCurrentText(DEFAULT_SIZE)
+        self.web_size.setToolTip("More points show more detail but make a bigger file that "
+                                 "needs a faster computer to open. Phones and tablets: Small.")
+        gl_.addWidget(self.web_size)
+        self.b_web = QPushButton("Make browser walk-through…")
+        self.b_web.clicked.connect(lambda: self.win.make_browser_walk(
+            SIZES[self.web_size.currentText()]))
+        gl_.addWidget(self.b_web)
+        lay.addWidget(g)
         lay.addStretch(1)
         self.refresh()
 
@@ -236,6 +262,7 @@ class InspectPanel(QWidget):
         self.b_shot.setEnabled(self.view.view is not None)
         doc = self.doc
         self.b_copc.setEnabled(not busy and (doc.result is not None or len(doc.scans) == 1))
+        self.b_web.setEnabled(not busy and bool(doc.scans or doc.project.exports))
 
     # ---------------------------------------------------------------- saving
 

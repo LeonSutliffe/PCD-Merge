@@ -16,8 +16,8 @@ import ctypes
 import time
 
 import numpy as np
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QSurfaceFormat
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPen, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,8 +34,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .flyscene import (VERTEX_DTYPE, FlyCamera, Scene, default_speed, plan_frame,
-                       start_camera)
+from .flyscene import (VERTEX_DTYPE, FlyCamera, Scene, default_speed, near_points, pick,
+                       plan_frame, region_mask, start_camera)
 
 BACKGROUND = (0.07, 0.07, 0.09)
 LOOK_DEG_PER_PX = 0.15
@@ -48,12 +48,17 @@ DETAIL = {
 }
 DEFAULT_DETAIL = "High"
 MIN_BUDGET = 250_000
+MEASURE_COLOUR = QColor(90, 220, 255)
+PENDING_COLOUR = QColor(255, 140, 25)
+# tools the walk-through can use (Edit's selection tools, the cut, Measure)
+WALK_TOOLS = ("brush", "rectangle", "lasso", "object", "cut", "measure")
 
 _VERT = """
 #version 120
 attribute vec3 a_pos;
 attribute vec4 a_col;
 attribute float a_spacing;
+attribute float a_flag;  // 0 normal, 1 selected, 2 hidden, 3 deleted (shown)
 uniform mat4 u_mvp;
 uniform mat4 u_mv;
 uniform float u_focal;
@@ -64,12 +69,23 @@ uniform float u_fog;
 uniform vec3 u_bg;
 varying vec3 v_col;
 void main() {
+    if (a_flag > 1.5 && a_flag < 2.5) {  // hidden: outside the view, never drawn
+        gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
+        gl_PointSize = 1.0;
+        v_col = u_bg;
+        return;
+    }
     vec4 p = vec4(a_pos, 1.0);
     gl_Position = u_mvp * p;
     float d = max(-(u_mv * p).z, 1e-3);
     gl_PointSize = clamp(a_spacing * u_level * u_scale * u_focal / d, 1.0, u_max_size);
     float f = clamp(d / u_fog, 0.0, 1.0);
     v_col = mix(a_col.rgb, u_bg, 0.8 * f * f);
+    if (a_flag > 0.5 && a_flag < 1.5) {
+        v_col = vec3(1.0, 0.85, 0.1);  // selected: yellow, as in the orbit view
+    } else if (a_flag > 2.5) {
+        v_col = vec3(0.45, 0.12, 0.12);  // deleted, shown to be restored: dark red
+    }
 }
 """
 
@@ -114,6 +130,24 @@ class FlyView(QOpenGLWidget):
         self._prog = None
         self._vbo = None
         self._dirty_colours = True
+        # Editing and measuring (the main window's tools work here too)
+        self.view = self  # tools reach the widget's size through view.view
+        self.hint = None  # a QLabel for tool hints (set by FlyThroughWindow)
+        self.tool = None
+        self.measurements = lambda: []  # the project's measurements (project frame)
+        self.on_tool_changed = None
+        self.reach = 0.0  # how deep a lasso / rectangle goes; 0: to the nearest surface
+        self.show_deleted = False
+        self._regions = []
+        self._selected = None  # bool per vertex
+        self._flags = None  # uint8 per vertex for the shader, None: all 0
+        self._flags_vbo = None
+        self._flags_dirty = False
+        self._pending = None  # first point of a distance being measured
+        self._tool_down = False
+        self._hover_depth = None
+        self._hover_time = 0.0
+        self.overlay = _FlyOverlay(self)
 
         fmt = QSurfaceFormat.defaultFormat()
         fmt.setDepthBufferSize(24)
@@ -147,7 +181,7 @@ class FlyView(QOpenGLWidget):
         prog = GL.glCreateProgram()
         GL.glAttachShader(prog, compile_shader(_VERT, GL.GL_VERTEX_SHADER))
         GL.glAttachShader(prog, compile_shader(_FRAG, GL.GL_FRAGMENT_SHADER))
-        for i, name in enumerate(("a_pos", "a_col", "a_spacing")):
+        for i, name in enumerate(("a_pos", "a_col", "a_spacing", "a_flag")):
             GL.glBindAttribLocation(prog, i, name)
         GL.glLinkProgram(prog)
         if not GL.glGetProgramiv(prog, GL.GL_LINK_STATUS):
@@ -156,6 +190,8 @@ class FlyView(QOpenGLWidget):
         self._u = {n: GL.glGetUniformLocation(prog, n) for n in (
             "u_mvp", "u_mv", "u_focal", "u_level", "u_scale", "u_max_size", "u_fog", "u_bg")}
         self._vbo = GL.glGenBuffers(1)
+        self._flags_vbo = GL.glGenBuffers(1)
+        self._flags_dirty = True
         self._upload()
 
     def _upload(self):
@@ -250,14 +286,32 @@ class FlyView(QOpenGLWidget):
                                  ctypes.c_void_p(VERTEX_DTYPE.fields["rgba"][1]))
         GL.glVertexAttribPointer(2, 1, GL.GL_FLOAT, GL.GL_FALSE, stride,
                                  ctypes.c_void_p(VERTEX_DTYPE.fields["spacing"][1]))
+        if self._flags_dirty:
+            self._upload_flags(GL)
+        if self._flags is not None:
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._flags_vbo)
+            GL.glEnableVertexAttribArray(3)
+            GL.glVertexAttribPointer(3, 1, GL.GL_UNSIGNED_BYTE, GL.GL_FALSE, 1, ctypes.c_void_p(0))
+        else:
+            GL.glDisableVertexAttribArray(3)
+            GL.glVertexAttrib1f(3, 0.0)
         for size_factor, firsts, counts in plan.levels:
             GL.glUniform1f(u["u_level"], size_factor)
             GL.glMultiDrawArrays(GL.GL_POINTS, firsts, counts, len(firsts))
         GL.glDisableVertexAttribArray(0)
         GL.glDisableVertexAttribArray(1)
         GL.glDisableVertexAttribArray(2)
+        GL.glDisableVertexAttribArray(3)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
         GL.glUseProgram(0)
+
+    def _upload_flags(self, GL):
+        self._flags_dirty = False
+        if self._flags is None or self._flags_vbo is None:
+            return
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._flags_vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self._flags.nbytes, self._flags, GL.GL_DYNAMIC_DRAW)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
 
     def release_gl(self):
         if self._vbo is None:
@@ -267,16 +321,172 @@ class FlyView(QOpenGLWidget):
         self.makeCurrent()
         try:
             GL.glDeleteBuffers(1, [self._vbo])
+            if self._flags_vbo is not None:
+                GL.glDeleteBuffers(1, [self._flags_vbo])
             if self._prog:
                 GL.glDeleteProgram(self._prog)
         except Exception:
             pass
-        self._vbo = self._prog = None
+        self._vbo = self._prog = self._flags_vbo = None
         self.doneCurrent()
 
     def _report(self):
         if self.on_status:
             self.on_status(self)
+        if self._overlay_wanted():
+            self.overlay.update()
+
+    # ------------------------------------------------------------- tools
+    # The same tools as the orbit view (edit_tools.py) work here: this view
+    # offers what they use (pick, ndc, camera_mvp, pixel_size, ...).
+
+    def set_tool(self, tool) -> None:
+        if self.tool is not None and self.tool is not tool:
+            self.tool.cancel()
+        self.tool = tool
+        self._tool_down = False
+        self._pending = None
+        if tool is not None:
+            tool.view = self
+            self.setCursor(tool.cursor)
+        else:
+            self.unsetCursor()
+        if self.on_tool_changed:
+            self.on_tool_changed()
+        self._report()
+        self.overlay.update()
+
+    def _overlay_wanted(self) -> bool:
+        return (self.tool is not None or self._locked or self._pending is not None
+                or any(m.visible for m in self.measurements()))
+
+    def camera_mvp(self) -> np.ndarray:
+        """Maps project-frame points to clip space with the current camera."""
+        w, h = max(1, self.width()), max(1, self.height())
+        m = self.cam.projection_matrix(w / h) @ self.cam.view_matrix()
+        shift = np.eye(4)
+        shift[:3, 3] = -self.scene.origin
+        return m @ shift
+
+    def _scene_mvp(self) -> np.ndarray:
+        w, h = max(1, self.width()), max(1, self.height())
+        return self.cam.projection_matrix(w / h) @ self.cam.view_matrix()
+
+    def ndc(self, pos) -> np.ndarray:
+        return np.array([2.0 * pos.x() / max(1, self.width()) - 1.0,
+                         1.0 - 2.0 * pos.y() / max(1, self.height())])
+
+    def measurements_shown(self) -> bool:
+        """Edits and measurements are made where the scans are aligned."""
+        return bool(self.scene.project_frame)
+
+    def pick(self, pos, radius_px: float = 7.0, scans=None, exports: bool = True):
+        """The nearest point under the mouse (project frame), or None."""
+        if not self.scene.project_frame:
+            return None
+        i = pick(self.scene, self._scene_mvp(), self.ndc(pos), (self.width(), self.height()),
+                 radius_px, self.scene.hidden)
+        if i is None:
+            return None
+        p = self.scene.vertices["pos"][i].astype(np.float64)
+        self._hover_depth = float(np.linalg.norm(p - self.cam.pos))
+        return p + self.scene.origin
+
+    def pixel_size(self) -> float:
+        """How much one pixel spans at the depth under the mouse."""
+        depth = self._hover_depth or 3.0
+        return depth / max(self.cam.focal_px(max(1, self.height())), 1e-9)
+
+    def set_pending_point(self, pt) -> None:
+        self._pending = None if pt is None else np.asarray(pt, float)
+        self.overlay.update()
+
+    def shape_region(self, ndc):
+        """A lasso or rectangle, as a region: through the view, but only as
+        far as the nearest surface inside it (plus a margin), or ``reach``."""
+        from .edits import ScreenShape
+
+        mvp = self.camera_mvp()
+        far = self.reach if self.reach > 0 else None
+        if far is None:
+            probe = ScreenShape(ndc, self._scene_mvp())
+            pos = self.scene.vertices["pos"]
+            depths = []
+            for k in range(0, len(pos), 2_000_000):
+                p = pos[k:k + 2_000_000].astype(np.float64)
+                m = probe.contains(p)
+                if self.scene.hidden is not None:
+                    m &= ~self.scene.hidden[k:k + 2_000_000]
+                if m.any():
+                    depths.append(p[m] @ probe.mvp[3, :3] + probe.mvp[3, 3])
+            if depths:
+                d = np.concatenate(depths)
+                near = float(np.percentile(d, 2))
+                far = near + max(1.0, 0.5 * near)
+        self.last_reach = far
+        return ScreenShape(ndc, mvp, far=far)
+
+    def object_points(self, seed) -> np.ndarray:
+        """The points grow-to-object searches: those near the click."""
+        return near_points(self.scene, seed, 8.0, self.scene.hidden)
+
+    # ---- the selection and the edits
+
+    def set_show_deleted(self, on: bool) -> None:
+        on = bool(on)
+        if on != self.show_deleted:
+            self.show_deleted = on
+            if self.scene.edits is not None:
+                self.scene.edits.apply(on)
+            self.set_selection(self._regions)
+
+    def set_selection(self, regions) -> None:
+        self._regions = list(regions)
+        self._selected = None
+        for r in self._regions:
+            self._or_selection(r)
+        self._update_flags()
+
+    def extend_selection(self, region) -> None:
+        self._regions.append(region)
+        self._or_selection(region)
+        self._update_flags()
+
+    def _or_selection(self, region) -> None:
+        if not self.scene.project_frame:
+            return
+        m = region_mask(self.scene, region)
+        if self.scene.hidden is not None:
+            m &= ~self.scene.hidden
+        self._selected = m if self._selected is None else self._selected | m
+
+    def edits_changed(self, stack) -> None:
+        """The project's edits changed: show what is deleted now."""
+        if self.scene.edits is None:
+            return
+        self.scene.edits.update(stack)
+        self.scene.edits.apply(self.show_deleted)
+        self.set_selection(self._regions)
+
+    def _update_flags(self) -> None:
+        sc = self.scene
+        ed = sc.edits
+        sel = self._selected if self._selected is not None and self._selected.any() else None
+        if (sc.hidden is None and sel is None
+                and not (self.show_deleted and ed is not None and ed.deleted.any())):
+            flags = None
+        else:
+            flags = np.zeros(len(sc), dtype=np.uint8)
+            if self.show_deleted and ed is not None:
+                flags[ed.deleted] = 3
+            if sc.hidden is not None:
+                flags[sc.hidden] = 2
+            if sel is not None:
+                flags[sel] = 1
+        self._flags = flags
+        self._flags_dirty = True
+        self.update()
+        self.overlay.update()
 
     # ------------------------------------------------------------- movement
 
@@ -332,11 +542,20 @@ class FlyView(QOpenGLWidget):
             self._moving = False
             self.update()
 
+    def _tool_busy(self) -> bool:
+        """The tool is half-way through something Esc should cancel."""
+        t = self.tool
+        return t is not None and (getattr(t, "first", None) is not None
+                                  or bool(getattr(t, "points", None)))
+
     def keyPressEvent(self, e):
         key = e.key()
         if key == Qt.Key_Escape:
             if self._locked:
                 self._unlock()
+            elif self._tool_busy():
+                self.tool.cancel()
+                self.overlay.update()
             elif self.on_escape is not None:
                 self.on_escape()
             else:
@@ -371,23 +590,65 @@ class FlyView(QOpenGLWidget):
             if hasattr(self.window(), "sync_speed"):
                 self.window().sync_speed()
 
+    def _for_tool(self, e) -> bool:
+        """A left click (or drag) for the tool, not for looking around."""
+        return (self.tool is not None and e.button() == Qt.LeftButton
+                and not e.modifiers() & Qt.AltModifier)
+
     def mousePressEvent(self, e):
         self.setFocus()
-        if not self._locked:
-            self._drag = e.position().toPoint()
-            self._press_pos = self._drag
+        if self._locked:
+            if self._for_tool(e):  # mouse captured: the tool acts at the cross
+                self.tool.press(_AtCentre(self, e))
+                self.overlay.update()
+            return
+        if self._for_tool(e):
+            self._tool_down = True
+            self.tool.press(e)
+            self.overlay.update()
+            return
+        self._drag = e.position().toPoint()
+        self._press_pos = self._drag
 
     def mouseReleaseEvent(self, e):
         if self._locked:
+            if self._for_tool(e):
+                self.tool.release(_AtCentre(self, e))
+                self.overlay.update()
+            return
+        if self._tool_down and e.button() == Qt.LeftButton:
+            self._tool_down = False
+            self.tool.release(e)
+            self.overlay.update()
             return
         moved = (self._press_pos is not None
                  and (e.position().toPoint() - self._press_pos).manhattanLength() > 4)
         self._drag = self._press_pos = None
-        if not moved and e.button() == Qt.LeftButton:
+        # with a tool chosen, clicks are for the tool; right-drag looks around
+        if not moved and e.button() == Qt.LeftButton and self.tool is None:
             self._lock()
+
+    def leaveEvent(self, e):
+        if self.tool is not None:
+            self.tool.leave()
+            self.overlay.update()
+        super().leaveEvent(e)
+
+    def resizeEvent(self, e):
+        self.overlay.resize(self.size())
+        super().resizeEvent(e)
 
     def mouseMoveEvent(self, e):
         p = e.position().toPoint()
+        if not self._locked and self._drag is None and self.tool is not None:
+            if self.tool.name == "brush" and not self._tool_down:
+                now = time.perf_counter()
+                if now - self._hover_time > 0.05:  # the circle's size: depth under the mouse
+                    self._hover_time = now
+                    self.pick(e.position())
+            self.tool.move(e)
+            self.overlay.update()
+            return
         if self._locked:
             centre = self.rect().center()
             d = p - centre
@@ -422,12 +683,123 @@ class FlyView(QOpenGLWidget):
         return self._locked
 
 
+class _AtCentre:
+    """A mouse event at the middle of the view (the cross), for the tool
+    while the mouse is captured."""
+
+    def __init__(self, view, e):
+        self._pos = QPointF(view.width() / 2.0, view.height() / 2.0)
+        self._button, self._buttons, self._mods = e.button(), e.buttons(), e.modifiers()
+
+    def position(self):
+        return self._pos
+
+    def button(self):
+        return self._button
+
+    def buttons(self):
+        return self._buttons
+
+    def modifiers(self):
+        return self._mods
+
+
+def _label_font() -> QFont:
+    f = QFont()
+    f.setPointSizeF(10.5)
+    f.setBold(True)
+    return f
+
+
+class _FlyOverlay(QWidget):
+    """Drawn over the walk-through: measurements, the tool's outline (lasso,
+    brush circle, ...) and a cross while the mouse is captured."""
+
+    def __init__(self, fly: "FlyView"):
+        super().__init__(fly)
+        self.fly = fly
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.resize(fly.size())
+        self.show()
+
+    def _screen(self, mvp, p):
+        """Project-frame point to (x, y) pixels, or None if behind the camera."""
+        c = mvp @ np.r_[p, 1.0]
+        if c[3] <= 1e-6:
+            return None
+        return QPointF((c[0] / c[3] + 1) / 2 * self.width(), (1 - c[1] / c[3]) / 2 * self.height())
+
+    def _segment(self, mvp, a, b):
+        """A line between two project-frame points, cut where it goes behind
+        the camera."""
+        ca, cb = mvp @ np.r_[a, 1.0], mvp @ np.r_[b, 1.0]
+        near = 1e-3
+        if ca[3] <= near and cb[3] <= near:
+            return None
+        if ca[3] <= near or cb[3] <= near:
+            t = (near - ca[3]) / (cb[3] - ca[3])
+            m = np.asarray(a) + t * (np.asarray(b) - np.asarray(a))
+            if ca[3] <= near:
+                a = m
+            else:
+                b = m
+        pa, pb = self._screen(mvp, a), self._screen(mvp, b)
+        return None if pa is None or pb is None else (pa, pb)
+
+    def paintEvent(self, _e):
+        fly = self.fly
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        if fly.measurements_shown():
+            mvp = fly.camera_mvp()
+            p.setFont(_label_font())
+            for m in fly.measurements():
+                if not m.visible:
+                    continue
+                pts = [np.asarray(x, float) for x in m.points]
+                if m.kind == "distance":
+                    seg = self._segment(mvp, pts[0], pts[1])
+                    if seg is not None:
+                        p.setPen(QPen(MEASURE_COLOUR, 2.0))
+                        p.drawLine(*seg)
+                p.setPen(Qt.NoPen)
+                p.setBrush(MEASURE_COLOUR)
+                for x in pts:
+                    s = self._screen(mvp, x)
+                    if s is not None:
+                        p.drawEllipse(s, 4.0, 4.0)
+                text = m.name or m.summary()
+                if m.name and m.kind == "distance":
+                    text = f"{m.name}: {m.summary()}"
+                s = self._screen(mvp, np.mean(pts, axis=0))
+                if s is not None:
+                    p.setPen(QColor(200, 240, 255))
+                    p.drawText(s + QPointF(6, -6), text)
+            if fly._pending is not None:
+                s = self._screen(mvp, fly._pending)
+                if s is not None:
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(PENDING_COLOUR)
+                    p.drawEllipse(s, 5.5, 5.5)
+        p.setBrush(Qt.NoBrush)
+        if fly.tool is not None:
+            fly.tool.paint(p)
+        if fly.locked:
+            c = QPointF(self.width() / 2.0, self.height() / 2.0)
+            p.setPen(QPen(QColor(255, 255, 255, 200), 1.4))
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                p.drawLine(c + QPointF(4 * dx, 4 * dy), c + QPointF(11 * dx, 11 * dy))
+        p.end()
+
+
 class FlyThroughWindow(QWidget):
     """A :class:`FlyView` with its settings: a window of its own, or, with
     ``on_exit``, a panel embedded in the main window's 3D view (Esc and the
     "Leave" button call ``on_exit``)."""
 
-    def __init__(self, scene: Scene, title: str = "Fly-through", parent=None, on_exit=None):
+    def __init__(self, scene: Scene, title: str = "Fly-through", parent=None, on_exit=None,
+                 on_panels=None):
         super().__init__(parent, Qt.Widget if on_exit else Qt.Window)
         self.embedded = on_exit is not None
         self.on_gl_failed = None  # embedded: called with the error if OpenGL fails
@@ -481,6 +853,19 @@ class FlyThroughWindow(QWidget):
                                "down. On: W flies in the direction you are looking.")
         self.follow.toggled.connect(self._set_follow)
         top.addWidget(self.follow)
+        self.reach_label = QLabel("Lasso depth:")
+        self.reach = QDoubleSpinBox()
+        self.reach.setRange(0.0, 1000.0)
+        self.reach.setDecimals(1)
+        self.reach.setSingleStep(0.5)
+        self.reach.setSuffix(" m")
+        self.reach.setSpecialValueText("Auto")
+        self.reach.setToolTip("How far a lasso or rectangle reaches from you. Auto: just past "
+                              "the nearest surface inside it, so a lasso round a person does "
+                              "not also take the rooms behind the wall.")
+        self.reach.valueChanged.connect(lambda v: setattr(self.view, "reach", float(v)))
+        top.addWidget(self.reach_label)
+        top.addWidget(self.reach)
         top.addStretch(1)
         self.jump = QComboBox()
         self.jump.setToolTip("Jump to where a scan was taken (keys 1-9 do the same).")
@@ -502,9 +887,18 @@ class FlyThroughWindow(QWidget):
             b_leave.setToolTip("Back to the orbit view (Esc)")
             b_leave.clicked.connect(on_exit)
             top.addWidget(b_leave)
+        self.b_panels = None
+        if on_panels is not None:  # hide the main window's side panels: a bigger view
+            self.b_panels = QPushButton("Hide panels")
+            self.b_panels.setCheckable(True)
+            self.b_panels.setToolTip("Hide the project list and the settings so the view "
+                                     "fills the window (F11).")
+            self.b_panels.toggled.connect(lambda on: (on_panels(on), self.view.setFocus()))
+            top.addWidget(self.b_panels)
         lay.addLayout(top)
 
         self.view = FlyView(scene, self, on_status=self._status)
+        self.view.on_tool_changed = lambda: self._status(self.view)
         if self.embedded:
             self.view.on_escape = on_exit
             lay.setContentsMargins(0, 0, 0, 0)
@@ -530,6 +924,12 @@ class FlyThroughWindow(QWidget):
         QTimer.singleShot(0, self.view.setFocus)
         QTimer.singleShot(500, self._check_error)
 
+    def resume(self, pos, yaw, pitch, speed):
+        """Go back to where a previous walk through this scene was left."""
+        self.view.go_to(pos, yaw, pitch)
+        self.view.set_speed(speed)
+        self.sync_speed()
+
     def sync_speed(self):
         self.speed.blockSignals(True)
         self.speed.setValue(self.view.speed)
@@ -537,7 +937,18 @@ class FlyThroughWindow(QWidget):
         self.view.setFocus()
 
     def _status(self, view: FlyView):
-        if view.locked:
+        shape = view.tool is not None and view.tool.name in ("rectangle", "lasso")
+        self.reach_label.setVisible(shape)
+        self.reach.setVisible(shape)
+        if view.tool is not None:
+            hint = view.tool.hint.replace("Alt-drag: rotate", "Right-drag: look around")
+            if view.locked:
+                hint = (f"Click: {view.tool.name} at the cross   W A S D: move   "
+                        "Esc: release the mouse")
+            else:
+                hint += "   W A S D: move"
+            self.help.setText(hint)
+        elif view.locked:
             self.help.setText("W A S D: move   Mouse: look   Space/E: up   C/Q: down   "
                               "Shift: faster   Wheel: speed   Esc: release the mouse")
         else:

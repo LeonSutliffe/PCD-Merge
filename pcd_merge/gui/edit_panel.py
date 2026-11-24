@@ -100,7 +100,9 @@ class EditPanel(QWidget):
         size_row.addStretch(1)
         gl_.addLayout(size_row)
         hint = QLabel("Shift adds to the selection. Alt + drag rotates the view while a tool "
-                      "is chosen; the right button pans and the wheel zooms as usual.")
+                      "is chosen; the right button pans and the wheel zooms as usual. Every "
+                      "tool works in the walk-through too: there the right button looks "
+                      "around.")
         hint.setWordWrap(True)
         hint.setStyleSheet(HINT_STYLE)
         gl_.addWidget(hint)
@@ -253,14 +255,10 @@ class EditPanel(QWidget):
         self.regions.append(region)
         self.view.extend_selection(region)
 
-    def grow_at(self, seed, add: bool = False) -> None:
-        """Select the object at ``seed`` (grown over the drawn points)."""
-        pts = []
-        for i, scan in enumerate(self.doc.scans):
-            if scan.entry.visible:
-                proj, hidden = self.view.project_points(i)
-                pts.append(proj[~hidden])
-        xyz = np.concatenate(pts) if pts else np.zeros((0, 3))
+    def grow_at(self, seed, add: bool = False, points=None) -> None:
+        """Select the object at ``seed``, grown over ``points`` (project
+        frame; default: the points drawn in the orbit view)."""
+        xyz = self.view.object_points(seed) if points is None else points
         region = grow_object(xyz, seed)
         if not len(region.keys):
             self.win.tasks.set_status("No object found there.")
