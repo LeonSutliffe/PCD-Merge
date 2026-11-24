@@ -638,3 +638,36 @@ def add_recent(folder: str) -> None:
         os.replace(tmp, _recent_file())
     except OSError:
         pass  # not being able to remember is no reason to fail
+
+
+def _settings_file() -> str:
+    return os.path.join(config_dir(), "settings.json")
+
+
+def _read_settings() -> dict:
+    try:
+        with open(_settings_file(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def last_save_folder() -> str | None:
+    """The folder the last file was saved to (any kind of export), if it is
+    still there."""
+    d = _read_settings().get("last_save_folder")
+    return d if isinstance(d, str) and os.path.isdir(d) else None
+
+
+def remember_save_folder(folder: str) -> None:
+    data = _read_settings()
+    data["last_save_folder"] = os.path.abspath(folder)
+    try:
+        os.makedirs(config_dir(), exist_ok=True)
+        tmp = _settings_file() + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, _settings_file())
+    except OSError:
+        pass  # not being able to remember is no reason to fail

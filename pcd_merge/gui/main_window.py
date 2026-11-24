@@ -33,6 +33,7 @@ from ..flyscene import build_scene
 from ..project import SUFFIX, ProjectError, from_manifest, is_project, recent_projects
 from ..readers import find_scan_files, input_filter
 from .align_panel import AlignPanel
+from .save_dialog import ask_save_path
 from .document import Document, load_clouds, load_files, sample_file, sample_missing
 from .edit_panel import TOOL_KEYS as EDIT_KEYS
 from .edit_panel import TOOL_LABELS, EditPanel
@@ -562,10 +563,9 @@ class MainWindow(QMainWindow):
                                     "what is ticked.")
             return
         if path is None:
-            folder = doc.project.folder if doc.project.saved else ""
-            start = os.path.join(folder, f"{doc.project.name} walk-through.html")
-            path, _ = QFileDialog.getSaveFileName(self, "Save browser walk-through", start,
-                                                  "Web page (*.html)")
+            path, _ = ask_save_path(self, "Save browser walk-through",
+                                    f"{doc.project.name} walk-through.html",
+                                    "Web page (*.html)", doc=doc)
             if not path:
                 return
             if not path.lower().endswith((".html", ".htm")):
