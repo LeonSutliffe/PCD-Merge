@@ -453,11 +453,15 @@ class AlignPanel(QWidget):
                               denoise=self.cb_denoise.isChecked(),
                               remove_moving=self.cb_moving.isChecked())
 
-    def merge(self, part=None, fmt: str | None = None):
+    def merge(self, part=None, fmt: str | None = None, revit: bool = False):
         """Merge and save. Points deleted in Edit mode are left out; ``part``
         saves only that part of a split site. One scan on its own can be
         saved too (cleaned up in Edit), with no alignment. ``fmt`` (such as
-        ".copc.laz") is the format offered first instead of the last one used."""
+        ".copc.laz") is the format offered first instead of the last one used.
+        ``revit`` saves an E57 for ReCap / Revit and then shows how to bring
+        it into Revit."""
+        if revit:
+            fmt = ".e57"
         doc = self.doc
         result = doc.result
         if result is None and len(doc.scans) != 1:
@@ -505,16 +509,19 @@ class AlignPanel(QWidget):
             "merged" if len(doc.scans) > 1 else _stem(doc.scans[0].entry.path) + " cleaned")
         if part is not None:
             stem += " - " + part.name
-        filters = file_filter()
+        filters = "E57 for ReCap / Revit (*.e57)" if revit else file_filter()
         chosen = next((f for f in filters.split(";;") if f.endswith(f"(*{ext})")), "")
-        title = ("Save viewing file" if fmt == ".copc.laz" else
+        title = ("Export for Revit" if revit else
+                 "Save viewing file" if fmt == ".copc.laz" else
                  f"Save part: {part.name}" if part is not None else
                  "Save merged cloud" if len(doc.scans) > 1 else "Save cleaned cloud")
         path, selected = ask_save_path(self, title, stem + ext, filters, chosen, doc, suggested)
         if not path:
             return
         typed = _ext(path)
-        if typed in FORMATS:
+        if revit and typed != ".e57":
+            path += ".e57"
+        elif typed in FORMATS:
             ext = typed
         else:  # no (known) extension typed: use the format picked in the dialog
             ext = next((e for e in FORMATS if selected.endswith(f"(*{e})")), ".pcd")
@@ -535,6 +542,8 @@ class AlignPanel(QWidget):
 
         edits = doc.edit_snapshot()
         keys = [s.entry.key for s in doc.scans]
+
+        self._for_revit = revit
 
         def go():
             sources = [s.source() for s in doc.scans]
@@ -575,7 +584,13 @@ class AlignPanel(QWidget):
                 "you add new scans to it later.")
         msg += ("\n\nThe merged cloud is now listed under Merged clouds and shown in the "
                 "view; the scans are hidden. Tick or untick any of them to compare.")
-        QMessageBox.information(self, "PCD Merge", msg)
+        if getattr(self, "_for_revit", False):
+            from .revit_help import show_revit_steps
+
+            self._for_revit = False
+            show_revit_steps(self, path, [n for n in notes if not n.startswith("E57 has no")])
+        else:
+            QMessageBox.information(self, "PCD Merge", msg)
         self.win.show_export(os.path.abspath(path), True)
 
     def save_transforms(self):

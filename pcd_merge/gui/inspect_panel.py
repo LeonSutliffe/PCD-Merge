@@ -123,6 +123,28 @@ class InspectPanel(QWidget):
         gl_.addWidget(self.b_copc)
         lay.addWidget(g)
 
+        # ---- Revit
+        g = QGroupBox("For Revit (via ReCap)")
+        gl_ = QVBoxLayout(g)
+        note = QLabel("Revit links point clouds only as Autodesk .rcp/.rcs files, which "
+                      "only Autodesk software can make. This saves an E57 file (in metres, "
+                      "with intensity and colour) that ReCap, which comes with Revit, turns "
+                      "into an .rcp in a few clicks. The steps are shown after saving. "
+                      "Deleted points and the clean-up set in Edit are left out, as in a "
+                      "merge.")
+        note.setWordWrap(True)
+        note.setStyleSheet(HINT_STYLE)
+        gl_.addWidget(note)
+        row = QHBoxLayout()
+        self.b_revit = QPushButton("Export for Revit…")
+        self.b_revit.clicked.connect(lambda: self.win.align_panel.merge(revit=True))
+        b_steps = QPushButton("How to open it in Revit")
+        b_steps.clicked.connect(self._revit_steps)
+        row.addWidget(self.b_revit)
+        row.addWidget(b_steps)
+        gl_.addLayout(row)
+        lay.addWidget(g)
+
         # ---- browser walk-through
         g = QGroupBox("Browser walk-through")
         gl_ = QVBoxLayout(g)
@@ -263,12 +285,18 @@ class InspectPanel(QWidget):
         self.b_shot.setEnabled(self.view.view is not None)
         doc = self.doc
         self.b_copc.setEnabled(not busy and (doc.result is not None or len(doc.scans) == 1))
+        self.b_revit.setEnabled(self.b_copc.isEnabled())
         self.b_web.setEnabled(not busy and bool(doc.scans or doc.project.exports))
 
     # ---------------------------------------------------------------- saving
 
     def _name(self, what: str) -> str:
         return f"{self.doc.project.name} {what}" if self.doc.project.saved else what
+
+    def _revit_steps(self):
+        from .revit_help import show_revit_steps
+
+        show_revit_steps(self)
 
     def _export_csv(self):
         path, _ = ask_save_path(self, "Export measurements",
