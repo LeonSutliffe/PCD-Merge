@@ -217,6 +217,20 @@ COPC is also offered in the save dialog of every merge. The file is written
 in two passes through a temporary file next to it, so allow about twice its
 uncompressed size (36 bytes a point) of free disk space while it is made.
 
+**Export for Revit…** (in Inspect) saves the site as an E57 file for Autodesk
+ReCap, which turns it into the `.rcp`/`.rcs` files Revit links. Revit reads no
+other point cloud format, and only Autodesk software writes those two, so the
+app cannot write them itself. The E57 is in metres (as E57 always is), with
+double-precision coordinates, intensity and colour, and the scan named after
+the file. Deleted points and the Edit clean-up are left out, as in a merge. After
+saving, the app shows the steps: in ReCap, *New Project* > *Import point cloud*
+> pick the file > *Index scans* > *Launch project* > save; in Revit,
+*Insert* > *Point Cloud* > the `.rcp`, positioned *Auto - Origin to Origin*.
+A Model mode IFC linked the same way (*Insert* > *Link IFC*) sits exactly on
+the cloud. The app warns if the cloud looks like millimetres or lies more than
+30 km from the origin (Revit handles that badly). *How to open it in Revit*
+shows the steps again.
+
 **Make browser walk-through…** (in Inspect) saves the site as **one `.html`
 file that opens in any web browser** (Chrome, Edge, Firefox, Safari) by
 double-clicking it, straight into a walk-through. It needs no app, no

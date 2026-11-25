@@ -43,7 +43,7 @@ FORMATS = {
     ".ply": "PLY point cloud",
     ".las": "LAS (survey / GIS)",
     ".laz": "LAZ (compressed LAS)",
-    ".e57": "E57 (scanner exchange)",
+    ".e57": "E57 (scanner exchange, ReCap / Revit)",
     ".copc.laz": "COPC (cloud-optimised LAZ, for viewers)",
 }
 
@@ -578,6 +578,30 @@ class _COPCWriter(_LASWriter):
 # --------------------------------------------------------------------------
 # E57
 
+FAR_FROM_ORIGIN = 30_000.0  # m; Revit warns about geometry beyond ~32 km (20 miles)
+MM_EXTENT = 3_000.0  # m; a building scan this big is more likely in millimetres
+
+
+def placement_notes(lo: np.ndarray, hi: np.ndarray) -> list[str]:
+    """Warnings about units and position for programs that assume metres
+    near the origin (E57 is always metres; Revit and ReCap read it so)."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
+        return []
+    notes = []
+    extent = float(np.max(hi - lo))
+    if extent > MM_EXTENT:
+        notes.append(f"the cloud is {extent:,.0f} units across. E57 is always in metres, "
+                     "so if the scans are in millimetres it will come into ReCap and Revit "
+                     "1000 times too big")
+    far = float(np.max(np.maximum(np.abs(lo), np.abs(hi))))
+    if far > FAR_FROM_ORIGIN:
+        notes.append(f"the points are up to {far / 1000:,.0f} km from the origin. Revit "
+                     "works badly with anything more than about 30 km (20 miles) from its "
+                     "origin, so in Revit place it with Auto - Center to Center, or by "
+                     "shared coordinates after setting the survey point")
+    return notes
+
 
 class _E57Writer(CloudWriter):
     CHUNK = 1_000_000
@@ -622,11 +646,26 @@ class _E57Writer(CloudWriter):
         img = self.e57.image_file
         scan = libe57.StructureNode(img)
         scan.set("guid", libe57.StringNode(img, "{%s}" % uuid.uuid4()))
-        scan.set("name", libe57.StringNode(img, "Merged"))
+        # ReCap shows this as the scan's name
+        title = os.path.splitext(os.path.basename(path))[0] or "Merged"
+        scan.set("name", libe57.StringNode(img, title))
         scan.set("description", libe57.StringNode(img, "Merged by PCD Merge"))
+        # An explicit "no rotation, no shift" pose: some readers (ReCap among
+        # them) handle a scan without one less predictably.
+        pose = libe57.StructureNode(img)
+        rot = libe57.StructureNode(img)
+        for k, v in zip("wxyz", (1.0, 0.0, 0.0, 0.0)):
+            rot.set(k, libe57.FloatNode(img, v))
+        pose.set("rotation", rot)
+        shift = libe57.StructureNode(img)
+        for k in "xyz":
+            shift.set(k, libe57.FloatNode(img, 0.0))
+        pose.set("translation", shift)
+        scan.set("pose", pose)
 
         lo = np.array([stats[k].lo for k in "xyz"])
         hi = np.array([stats[k].hi for k in "xyz"])
+        self.notes += placement_notes(lo, hi)
         bounds = libe57.StructureNode(img)
         for k, ax in enumerate("xyz"):
             bounds.set(f"{ax}Minimum", libe57.FloatNode(img, float(lo[k])))
@@ -640,6 +679,8 @@ class _E57Writer(CloudWriter):
         if "intensity" in self.cols:
             st = stats["intensity"]
             imin, imax = (st.lo, st.hi) if st.lo <= st.hi else (0.0, 0.0)
+            if imax <= imin:  # all one value: give readers a range they can divide by
+                imax = imin + 1.0
             lim = libe57.StructureNode(img)
             lim.set("intensityMinimum", libe57.FloatNode(img, imin))
             lim.set("intensityMaximum", libe57.FloatNode(img, imax))

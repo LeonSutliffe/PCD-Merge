@@ -137,3 +137,21 @@ def test_failed_write_leaves_no_file(tmp_path):
     with pytest.raises(ValueError):
         write_cloud(str(p), d)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_e57_for_revit_pose_name_and_unit_warnings(tmp_path):
+    pye57 = pytest.importorskip("pye57")
+    from pcd_merge.exporters import placement_notes
+
+    d = _sample()
+    p = str(tmp_path / "Warehouse.e57")
+    write_cloud(p, d)
+    e = pye57.E57(p)
+    h = e.get_header(0)
+    assert h["name"].value() == "Warehouse"
+    np.testing.assert_array_equal(h.rotation, [1, 0, 0, 0])
+    np.testing.assert_array_equal(h.translation, [0, 0, 0])
+    assert placement_notes([0, 0, 0], [200, 150, 30]) == []
+    assert "millimetres" in placement_notes([0, 0, 0], [200_000, 150_000, 30_000])[0]
+    far = placement_notes([512_000, 5_400_000, 0], [512_200, 5_400_200, 30])
+    assert len(far) == 1 and "Center to Center" in far[0]

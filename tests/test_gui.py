@@ -601,6 +601,39 @@ def test_make_viewing_file_from_inspect(window, qtbot, scans, tmp_path, monkeypa
     win.doc.dirty = False
 
 
+def test_export_for_revit_from_inspect(window, qtbot, scans, tmp_path, monkeypatch):
+    import pye57
+
+    from pcd_merge.gui import align_panel as ap
+    from pcd_merge.gui import revit_help
+
+    win = window()
+    win.load_paths([scans[0]])
+    _wait(qtbot, win)
+    win.modes.setCurrentIndex(2)
+    panel = win.inspect_panel
+    assert panel.b_revit.isEnabled()
+    out = str(tmp_path / "site")  # no extension typed: .e57 is added
+    seen, steps = {}, []
+
+    def dialog(_parent, title, _start, filters, chosen):
+        seen["title"], seen["filters"] = title, filters
+        return out, chosen
+
+    monkeypatch.setattr(ap.QFileDialog, "getSaveFileName", dialog)
+    monkeypatch.setattr(revit_help.QMessageBox, "exec", lambda self: steps.append(self.text()))
+    panel.b_revit.click()
+    _wait(qtbot, win)
+    assert seen["title"] == "Export for Revit" and seen["filters"].endswith("(*.e57)")
+    e = pye57.E57(out + ".e57")
+    h = e.get_header(0)
+    assert e.scan_count == 1 and h["name"].value() == "site"
+    assert len(e.read_scan_raw(0)["cartesianX"]) == len(read_cloud(scans[0]).data)
+    assert steps and "ReCap" in steps[0] and "Origin to Origin" in steps[0]
+    assert win.doc.project.settings.get("export", {}).get("format") != ".e57"
+    win.doc.dirty = False
+
+
 def test_walk_through_is_kept_and_panels_can_be_hidden(window, qtbot, scans):
     """Leaving the walk-through (to measure, say) and coming back must not
     build it again, and must come back where it was left."""
