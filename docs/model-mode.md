@@ -36,6 +36,10 @@ place to clear out furniture or split off one floor first.
    how closely it fits the scan (RMS, in mm); select one to see it in yellow,
    untick it to leave it out of the files, or **Delete** a wrong one. **Save
    IFC…**, **Save STEP…** or **Save 3D DXF…** write the ticked shapes.
+   **Leave out shelves and furniture** (on by default) keeps only the
+   building itself; untick it to fit everything flat or round in the scan.
+   The bar shows how far reading and fitting have got, and **Cancel** stops
+   it at any point.
 
 The levels, the fitted shapes and the settings are kept in the project folder
 (`model/model.json`) and come back when the project is opened.
@@ -67,7 +71,8 @@ the same place (a door, the end of a wall) are closed with a short line.
 Leftover points that sit on a circle become circles.
 
 **3D shapes.** The site is thinned to one point per cube of the chosen
-*Detail* (5 cm by default) and each point gets the direction of its surface,
+*Detail* (5 cm by default) while it is read, a few million points at a time,
+so even a very large scan is read in seconds to a minute, and each point gets the direction of its surface,
 turned to face the scanner that saw it (from the scan's `VIEWPOINT`).
 Neighbouring points on the same flat surface are grown into patches and each
 large one (0.4 m² or more) becomes a face with a rectangular outline. Level
@@ -80,6 +85,17 @@ building, and outlines are stretched to meet the neighbouring faces. Then:
 * A ceiling with a floor just above it gives a slab of the real thickness;
   otherwise the *One-sided slabs* thickness.
 * Sloping faces become roof slabs.
+* With *Leave out shelves and furniture*, the levels (from **Find levels**, or
+  looked for afresh if there are none) tell the building from what stands in
+  it. Level faces away from every floor and ceiling height are dropped
+  (shelves, tables, worktops). An upright face is a wall only if it reaches
+  the ceiling (within 35 cm) or stands at least 85% of the storey high; the
+  ends and backs of shelving and cupboards don't. A wall that reaches the
+  ceiling but whose lower part was hidden by something in front of it is
+  carried down to the floor (not where the scan sees through, as in a
+  doorway). A floor partly hidden under shelving is stretched to the ceiling
+  above it. Pipes shorter than 1 m are dropped (the edges of shelf boards look
+  like thin pipes).
 * The leftover points are searched for cylinders: normals all square to one
   direction, points on a circle around it. Upright ones of 8 cm radius or more
   are columns, the rest pipes. An inside corner looks like a quarter of a pipe
@@ -96,12 +112,18 @@ building, and outlines are stretched to meet the neighbouring faces. Then:
 * Pipes much thinner than twice the *Detail* are missed; choose *Fine* for small
   pipes.
 * The 3D fitting holds the thinned site in memory: at 5 cm detail up to about 6
-  million points (a large building). For a bigger site, choose *Coarse*, or
+  million points (a large building). Reading stops as soon as there are more,
+  with a message. For a bigger site, choose *Coarse*, or
   split it into parts in Edit mode and fit one part at a time (only ticked parts
   are used).
 * Merged clouds have no scanner position, so their normals can't be turned
   towards a scanner: walls are still found but their two faces are not paired,
   and levels fall back to "lowest is a floor".
+* A wall that is hidden by shelving all the way up to the ceiling has nothing
+  to fit to; scan from another spot, or draw it from the plan.
+* ASCII and compressed PCD files are unpacked whole before the first points
+  are thinned, so the bar waits at the start of such a file; binary PCD, PLY,
+  LAS/LAZ and E57 are read a piece at a time.
 
 ## Removing Model mode
 

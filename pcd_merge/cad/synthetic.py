@@ -45,9 +45,44 @@ def _cylinder(rng, base, axis, radius, length, density, sensor=None, arc=(0, 2 *
     return pts
 
 
-def make_building(density: float = 400.0, noise: float = 0.003, seed: int = 0):
+# shelving units in the ground-floor room on the left, (x0, x1, y0, y1, height):
+# two against the wall at y = 0.3 and a free-standing one in the middle
+SHELVES = [(0.6, 2.6, 0.3, 0.8, 2.0), (2.8, 4.6, 0.3, 0.8, 2.0), (1.0, 4.0, 4.6, 5.2, 1.4)]
+
+
+def _shelving(rng, unit, density):
+    """A shelving unit: five boards, two ends and a back, as points."""
+    x0, x1, y0, y1, h = unit
+    w, d = x1 - x0, y1 - y0
+    parts = []
+    for z in np.linspace(0.05, h, 5):
+        parts.append(_rect(rng, (x0, y0, z), (w, 0, 0), (0, d, 0), density))  # top of a board
+    for x in (x0, x1):
+        parts.append(_rect(rng, (x, y0, 0), (0, d, 0), (0, 0, h), density))
+    parts.append(_rect(rng, (x0, y1, 0), (w, 0, 0), (0, 0, h), density))  # back, facing the room
+    return np.concatenate(parts)
+
+
+def _hidden(pts, sensor, boxes):
+    """Points the scanner cannot see because a box is in the way."""
+    sensor = np.asarray(sensor, float)
+    d = pts - sensor
+    hid = np.zeros(len(pts), dtype=bool)
+    for x0, x1, y0, y1, h in boxes:
+        lo, hi = np.array([x0, y0, 0.0]), np.array([x1, y1, h])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t0, t1 = (lo - sensor) / d, (hi - sensor) / d
+        tmin = np.nanmax(np.minimum(t0, t1), axis=1)
+        tmax = np.nanmin(np.maximum(t0, t1), axis=1)
+        hid |= (tmin < tmax) & (tmax > 0) & (tmin < 0.98)  # crosses the box before the point
+    return hid
+
+
+def make_building(density: float = 400.0, noise: float = 0.003, seed: int = 0,
+                  shelving: bool = False):
     """Scans of the building: a list of ``(points (N, 3), scanner position)``,
-    one per room and storey."""
+    one per room and storey. With ``shelving`` the ground-floor room on the
+    left is full of shelves, which hide parts of its walls and floor."""
     rng = np.random.default_rng(seed)
     x0, x1, y0, y1 = OUTER
     ix0, iy0, ix1, iy1 = x0 + WALL, y0 + WALL, x1 - WALL, y1 - WALL
@@ -87,6 +122,11 @@ def make_building(density: float = 400.0, noise: float = 0.003, seed: int = 0):
                 py, pz, pr = PIPE
                 parts.append(_cylinder(rng, (rx0, py, pz), (1, 0, 0), pr, w, density, sensor))
             pts = np.concatenate(parts)
+            if shelving and lvl == 0 and r == 0:
+                pts = pts[~_hidden(pts, sensor, SHELVES)]
+                for u in SHELVES:
+                    sp = _shelving(rng, u, density)
+                    pts = np.concatenate([pts, sp[~_hidden(sp, sensor, [u])]])
             pts += rng.normal(0, noise, pts.shape)
             scans.append((pts, sensor))
     return scans

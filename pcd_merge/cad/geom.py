@@ -90,13 +90,44 @@ def components(n: int, a: np.ndarray, b: np.ndarray) -> np.ndarray:
             parent = pp
 
 
-def local_covariances(pts: np.ndarray, radius: float, max_nn: int = 30) -> np.ndarray:
-    """Per point, the 3x3 covariance of its neighbours within ``radius``."""
+TILE_POINTS = 1_000_000  # bigger sets are done in slabs, for progress and Cancel
+
+
+def local_covariances(pts: np.ndarray, radius: float, max_nn: int = 30,
+                      progress=None) -> np.ndarray:
+    """Per point, the 3x3 covariance of its neighbours within ``radius``.
+
+    A big set is done in slabs along its longest side (each with a margin
+    of ``radius`` so the points at its edges still see all their
+    neighbours), calling ``progress(fraction)`` after each; it may raise to
+    stop."""
     import open3d as o3d
 
-    pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.ascontiguousarray(pts, float)))
-    pc.estimate_covariances(o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn))
-    return np.asarray(pc.covariances)
+    def one(p):
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.ascontiguousarray(p, float)))
+        pc.estimate_covariances(o3d.geometry.KDTreeSearchParamHybrid(radius=radius,
+                                                                     max_nn=max_nn))
+        return np.asarray(pc.covariances)
+
+    n = len(pts)
+    if n <= TILE_POINTS:
+        out = one(pts) if n else np.zeros((0, 3, 3))
+        if progress:
+            progress(1.0)
+        return out
+    ax = int(np.argmax(np.ptp(pts, axis=0)))
+    order = np.argsort(pts[:, ax], kind="stable")
+    x = pts[order, ax]
+    out = np.empty((n, 3, 3))
+    for a in range(0, n, TILE_POINTS):
+        b = min(a + TILE_POINTS, n)
+        lo = np.searchsorted(x, x[a] - radius, side="left")
+        hi = np.searchsorted(x, x[b - 1] + radius, side="right")
+        cov = one(pts[order[lo:hi]])
+        out[order[a:b]] = cov[a - lo:b - lo]
+        if progress:
+            progress(b / n)
+    return out
 
 
 def local_shape(pts: np.ndarray, radius: float, max_nn: int = 30):
