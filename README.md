@@ -343,15 +343,19 @@ and faster, smaller is more precise. It never affects which points are merged.
 After aligning, the app measures how well the clouds agree, using the final
 transforms (what will actually be merged):
 
-* **Per pair:** overlap (share of points with a match in the other cloud), the
-  **offset** (how far the clouds still are from their best fit, i.e. the
-  estimated misalignment), the **fit** (RMS distance between the points that
-  match) and how much of the overlap **changed** between the scans.
-* **Grade:** *Good* when the offset is within 0.2 x the voxel size, at least
-  30% overlaps and at least 60% of the overlap matches; *Fair* up to 0.5 x
-  voxel, 15% overlap and 40% matching; otherwise *Poor*. The overall grade is
-  the worst overlapping pair. Merging a *Poor* result asks for confirmation
-  first.
+* **Per pair:** overlap (share of points on a surface the other cloud also
+  saw, from the same side), the **offset** (how far apart the two scans'
+  shared surfaces still are, i.e. the estimated misalignment), the **fit**
+  (RMS distance between the points that match) and how much of the overlap
+  **changed** between the scans.
+* **Grade:** *Good* when the offset is within 0.2 x the voxel size (or 1.5 x
+  the scans' own noise, for noisy scans), at least 15% overlaps and at least
+  60% of the overlap matches; *Fair* up to 0.5 x voxel (or 3 x the noise), 5%
+  overlap and 40% matching; otherwise *Poor*. The overall grade is the worst
+  pair that counts: with three or more scans, pairs that share only a sliver
+  (under 15%, typically scans at opposite ends of the site) are listed as
+  *not counted*, as long as every scan has a pair with real overlap. Merging
+  a *Poor* result asks for confirmation first.
 * **Heatmap:** set *Colour* to *Alignment error* to colour every point by its
   distance to the other clouds. Blue fits, red is at the end of the scale,
   magenta *changed* means the scans disagree there by more than that, and grey
@@ -361,16 +365,30 @@ transforms (what will actually be merged):
 Distances are point-to-plane (to the other cloud's local surface, not its
 nearest point), so two scans of the same wall read close to the sensor noise
 even though their points never coincide. Points further away than 1.5 x the
-voxel size count as not overlapping.
+voxel size count as not overlapping, and so do points whose surface faces
+another way: the floor next to a wall, or the other face of a wall (or rack,
+or shelf) seen from the next room or aisle, are different surfaces, not
+misalignment. (Which side a surface faces comes from where the scanner stood,
+the PCD VIEWPOINT or E57 pose.)
+
+**How the offset is measured.** The gaps between the two scans' surfaces are
+measured region by region (blocks of 20 voxels, separately for surfaces facing
+each way); within a region the noise averages out and what is left is how far
+one scan's surface sits in front of the other's. Then the small rigid movement
+that best explains those gaps is fitted, and the offset is the gap it predicts
+in the worst-off regions (90th percentile). So only misalignment that moving
+the scan could fix counts. Sliding along a long, flat site (a warehouse aisle,
+a corridor) changes no gap and doesn't count; earlier versions estimated the
+offset with an ICP that slid freely in such places and reported large offsets
+for alignments that were right to within a few centimetres.
 
 **Moved objects don't count against the grade.** A car that left, a person
 walking through or a door that opened makes the scans disagree in that spot,
-but says nothing about the alignment. The offset comes from a robust ICP
-(Tukey loss) started at the result: it ignores points that don't fit, so it
-measures how far the *static* parts are off. Changed points (magenta) are also
-left out of the fit. A real misalignment moves everything, so it still shows
-up in the offset, and in walls and poles turning magenta along their whole
-length rather than in a few separate objects.
+but no single movement of the whole scan explains it, so the robust fit
+ignores it. Changed points (magenta) are also left out of the fit. A real
+misalignment moves everything, so it still shows up in the offset, and in
+walls and poles turning magenta along their whole length rather than in a
+few separate objects.
 
 ![Heatmap of two well aligned scans where cars, people and a van moved: those show as magenta, the grade stays Good](docs/quality-heatmap.png)
 
