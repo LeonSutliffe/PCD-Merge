@@ -67,7 +67,9 @@ class EditPanel(QWidget):
         lay.addWidget(self.align_note)
 
         # ---- tools
-        g = QGroupBox("Select")
+        # The tools themselves are buttons on the left edge of the 3D view
+        # (tool_rail.py); these radio buttons stay, hidden, as their state.
+        g = QGroupBox("Selecting")
         gl_ = QVBoxLayout(g)
         self.tool_group = QButtonGroup(self)
         self.tool_buttons = {}
@@ -87,7 +89,13 @@ class EditPanel(QWidget):
             self.tool_group.addButton(b, k)
             self.tool_buttons[key] = b
             row.addWidget(b)
+            b.hide()
         row.addStretch(1)
+        self.tool_buttons["cut"].hide()
+        tools_hint = QLabel("Pick a tool on the left edge of the view, or press its key: "
+                            "V move, B brush, R rectangle, L lasso, O object, X cut line.")
+        tools_hint.setWordWrap(True)
+        gl_.addWidget(tools_hint)
         self.tool_buttons[None].setChecked(True)
         self.tool_group.idToggled.connect(self._tool_toggled)
         size_row = QHBoxLayout()
@@ -121,6 +129,7 @@ class EditPanel(QWidget):
         self.b_delete = QPushButton("Delete")
         self.b_delete.setToolTip("Delete the selected points (Del). Every full-resolution "
                                  "point inside the selection is left out when you save.")
+        self.b_delete.setProperty("danger", True)
         self.b_delete.clicked.connect(self.delete_selection)
         self.b_restore = QPushButton("Restore")
         self.b_restore.setToolTip("Bring deleted points inside the selection back. Tick "
@@ -193,6 +202,7 @@ class EditPanel(QWidget):
         gl_.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(self.tool_buttons["cut"])
+        row.addWidget(QLabel("Or draw a cut with the Cut line tool (X)."))
         row.addStretch(1)
         gl_.addLayout(row)
         hint = QLabel("Parts are listed on the left: tick to show or hide them, double-click "
@@ -209,6 +219,7 @@ class EditPanel(QWidget):
         self.b_save = QPushButton("Save cleaned cloud…")
         self.b_save.setToolTip("Save every scan, aligned, without the deleted points, as one "
                                "cloud (the same as Merge in Align, which also leaves them out).")
+        self.b_save.setProperty("primary", True)
         self.b_save.clicked.connect(self._save)
         lay.addWidget(self.b_save)
         lay.addStretch(1)

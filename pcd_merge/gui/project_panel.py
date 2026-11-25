@@ -41,7 +41,7 @@ class ProjectPanel(QWidget):
                                 "or a whole folder here,\nor use Add files…")
         self.drop_hint.setAlignment(Qt.AlignCenter)
         self.drop_hint.setStyleSheet(
-            "QLabel { border: 2px dashed #888; border-radius: 8px; padding: 14px; color: #666; }")
+            "QLabel { border: 2px dashed #3a4050; border-radius: 10px; padding: 14px; color: #8a92a2; }")
         lay.addWidget(self.drop_hint)
 
         self.tree = QTreeWidget()

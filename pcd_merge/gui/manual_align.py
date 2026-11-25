@@ -93,7 +93,7 @@ class ManualAlignBox(QGroupBox):
         self.b_undo = QPushButton("Undo point")
         self.b_undo.clicked.connect(self.undo_point)
         self.b_apply = QPushButton("Apply")
-        self.b_apply.setStyleSheet("font-weight: bold;")
+        self.b_apply.setProperty("primary", True)
         self.b_apply.clicked.connect(self.apply)
         row.addWidget(self.b_pick)
         row.addWidget(self.b_undo)

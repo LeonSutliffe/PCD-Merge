@@ -3,14 +3,18 @@ the middle, the current mode's settings on the right, and the task bar along
 the bottom.
 
 ```
- File  View  Help                         [ Align ] [ Edit ] [ Inspect ]
+ File  Edit  View  Help
+ PCD Merge  Office · saved      [ Align | Edit | Inspect | Model ]    Undo Redo
  +-------------+--------------------------------+-----------------+
- | PROJECT     |  3D view (orbit / walk)        | SETTINGS for    |
- |  Scans      |                                | the mode        |
- |  Parts ...  |                                |                 |
+ | PROJECT     |  view strip (camera, colour)   | SETTINGS for    |
+ |  Scans      | [tools]  3D view               | the mode        |
+ |  Parts ...  |      [N selected: Delete ...]  |                 |
  +-------------+--------------------------------+-----------------+
  status / progress / time left / Cancel
 ```
+
+Keys 1-4 switch mode. The look (one dark theme) is in theme.py, the tool
+buttons on the view in tool_rail.py.
 
 Each panel is its own module so features can be built side by side.
 """
@@ -24,8 +28,9 @@ import numpy as np
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMessageBox, QSplitter,
-                               QStackedWidget, QTabBar)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel, QMainWindow, QMessageBox,
+                               QSizePolicy, QSplitter, QStackedWidget, QTabBar, QToolBar,
+                               QWidget)
 
 from .. import __version__
 from ..files import already_merged, read_manifest
@@ -40,6 +45,7 @@ from .edit_panel import TOOL_LABELS, EditPanel
 from .inspect_panel import InspectPanel
 from .project_panel import ProjectPanel
 from .view3d import HAVE_GL, View3D
+from .tool_rail import SelectionBar, ToolRail
 from .workers import TaskBar
 
 MODES = ("Align", "Edit", "Inspect")
@@ -91,10 +97,11 @@ class MainWindow(QMainWindow):
         self.modes.setTabToolTip(2, "Look at the site and measure it: distances, heights, "
                                     "slopes and coordinates, and screenshots.")
         self.modes.setExpanding(False)
-        self.modes.setStyleSheet("QTabBar::tab { padding: 4px 18px; font-weight: bold; }")
+        self.modes.setObjectName("modes")
+        self.modes.setDrawBase(False)
         self.modes.currentChanged.connect(self._mode_changed)
         self._build_menus()
-        self.menuBar().setCornerWidget(self.modes, Qt.TopRightCorner)
+        self._build_top_bar()
 
         # wiring
         self.doc.changed.connect(self._doc_changed)
@@ -118,10 +125,35 @@ class MainWindow(QMainWindow):
             "The walk-through opened in a window of its own (it could not be drawn inside "
             f"this one: {err})."))
 
+        # tools and the selection's buttons, floating on the 3D view
+        self.rail = self.sel_bar = None
+        if self.view.view is not None:
+            self.rail = ToolRail(self, self.view.view)
+            self.sel_bar = SelectionBar(self, self.view.view)
+            self.view.b_measure.hide()  # the rail's ruler does it
+            self.view.tool_changed.connect(self.rail.sync)
+            self.view.measure_toggled.connect(self.rail.sync)
+            self.modes.currentChanged.connect(self.rail.sync)
+            self.view.selection_changed.connect(self.sel_bar.sync)
+            self.modes.currentChanged.connect(self.sel_bar.sync)
+            self.tasks.busy_changed.connect(self.sel_bar.sync)
+            self.doc.changed.connect(self.rail.sync)
+        self.view.walk_changed.connect(self._walk_changed)
+
         self.align_panel.load_settings()
         self._update_title()
         self._update_buttons()
         install_model_mode(self)
+        # 1 2 3 4: the modes (not while walking, where 1-9 go to the scan positions)
+        self.mode_keys = []
+        for k in range(self.modes.count()):
+            a = QAction(f"{self.modes.tabText(k)} mode", self)
+            a.setShortcut(QKeySequence(str(k + 1)))
+            a.triggered.connect(lambda _=False, i=k: self.modes.setCurrentIndex(i))
+            self.addAction(a)
+            self.mode_keys.append(a)
+            tip = self.modes.tabToolTip(k)
+            self.modes.setTabToolTip(k, f"{tip} Key: {k + 1}." if tip else f"Key: {k + 1}.")
 
     # ---------------------------------------------------------------- menus
 
@@ -209,6 +241,38 @@ class MainWindow(QMainWindow):
         self._action(h, "About PCD Merge", lambda: QMessageBox.about(
             self, "PCD Merge", f"PCD Merge {__version__}\n\nAlign, check and merge LiDAR scans."))
 
+    def _build_top_bar(self):
+        """The bar under the menus: the project's name on the left, the mode
+        switch in the middle, undo and redo on the right."""
+        bar = QToolBar("Modes")
+        bar.setObjectName("topbar")
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.toggleViewAction().setVisible(False)
+        bar.setContextMenuPolicy(Qt.PreventContextMenu)
+        app = QLabel("PCD Merge")
+        app.setObjectName("appname")
+        bar.addWidget(app)
+        self.project_label = QLabel()
+        self.project_label.setObjectName("projectname")
+        bar.addWidget(self.project_label)
+        for _ in range(2):
+            spring = QWidget()
+            spring.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            bar.addWidget(spring)
+            if _ == 0:
+                bar.addWidget(self.modes)
+        self.a_undo.setText("Undo")
+        self.a_redo.setText("Redo")
+        bar.addAction(self.a_undo)
+        bar.addAction(self.a_redo)
+        self.addToolBar(Qt.TopToolBarArea, bar)
+        self.top_bar = bar
+
+    def _walk_changed(self, walking: bool):
+        for a in self.mode_keys:
+            a.setEnabled(not walking)
+
     def _fill_recent(self):
         self.recent_menu.clear()
         items = recent_projects()
@@ -228,6 +292,9 @@ class MainWindow(QMainWindow):
         mark = " *" if self.doc.dirty and not p.saved else ""
         where = f" - {p.folder}" if p.saved else ""
         self.setWindowTitle(f"{p.name}{mark}{where} - PCD Merge {__version__}")
+        if hasattr(self, "project_label"):
+            state = "unsaved changes" if mark else ("saved" if p.saved else "not saved yet")
+            self.project_label.setText(f"  {p.name}  ·  {state}")
         self.project_panel.refresh()
 
     def _mode_changed(self, i):
@@ -885,6 +952,9 @@ def run(argv=None) -> int:
     args = sys.argv if argv is None else argv
     app = QApplication.instance() or QApplication(args)
     app.setApplicationName("PCD Merge")
+    from . import theme
+
+    theme.apply(app)
     from ..startup import before_main_window
 
     if before_main_window(app):

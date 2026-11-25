@@ -143,7 +143,7 @@ class AlignPanel(QWidget):
         lv.addWidget(box)
 
         self.b_align = QPushButton("Align")
-        self.b_align.setStyleSheet("font-weight: bold; padding: 8px;")
+        self.b_align.setProperty("primary", True)
         self.b_align.clicked.connect(lambda: self.start_align(new_seed=False))
         lv.addWidget(self.b_align)
 
@@ -272,7 +272,7 @@ class AlignPanel(QWidget):
         self.cleanup_summary.setStyleSheet(HINT_STYLE)
         ev.addWidget(self.cleanup_summary)
         self.b_merge = QPushButton("Accept and merge…")
-        self.b_merge.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.b_merge.setProperty("primary", True)
         self.b_merge.clicked.connect(self.merge)
         ev.addWidget(self.b_merge)
         lv.addWidget(box)

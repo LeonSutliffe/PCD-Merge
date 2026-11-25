@@ -931,3 +931,61 @@ def test_save_as_starts_in_the_last_folder_saved_to(window, qtbot, scans, tmp_pa
     sd.ask_save_path(win, "Save", "x.pcd", "PCD (*.pcd)", suggested=str(tmp_path / "m.pcd"))
     assert seen[-1] == str(tmp_path / "m.pcd")
     win.doc.dirty = False
+
+
+def test_tool_rail_mode_keys_and_selection_bar(window, qtbot, scans):
+    """The tool buttons on the view pick the same tools as the keys, the
+    keys 1-4 switch mode (but not while typing a number), and the floating
+    selection bar follows the Edit selection."""
+    from pcd_merge.gui import theme
+
+    theme.apply()
+    win = window()
+    win.resize(1200, 800)
+    win.load_paths(scans)
+    _wait(qtbot, win)
+    win.show()
+    qtbot.waitExposed(win)
+    rail, bar = win.rail, win.sel_bar
+    if rail is None:
+        pytest.skip("no OpenGL here")
+    # Align: only the ruler shows
+    assert not rail.buttons["brush"].isVisible() and rail.b_measure.isVisible()
+    # 2: Edit mode, and the tools appear
+    win.activateWindow()
+    qtbot.waitUntil(win.isActiveWindow)
+    win.view.view.setFocus()
+    qtbot.keyClick(win.view.view, Qt.Key_2)
+    assert win.modes.currentIndex() == 1
+    assert rail.buttons["brush"].isVisible()
+    rail.buttons["brush"].click()
+    assert win.edit_panel.current_tool() == "brush" and rail.buttons["brush"].isChecked()
+    rail.b_measure.click()  # measuring takes over
+    assert win.view.b_measure.isChecked() and rail.b_measure.isChecked()
+    assert not rail.buttons["brush"].isChecked()
+    rail.buttons["brush"].click()  # and the brush comes back (not off)
+    assert win.edit_panel.current_tool() == "brush" and not win.view.b_measure.isChecked()
+    rail.buttons["brush"].click()  # pressed again: off
+    assert win.edit_panel.current_tool() is None and rail.buttons[None].isChecked()
+    # typing a number in a box does not switch mode
+    box = win.edit_panel.brush
+    box.setFocus()
+    qtbot.waitUntil(box.hasFocus)
+    box.lineEdit().selectAll()
+    qtbot.keyClick(box.lineEdit(), Qt.Key_1)
+    assert win.modes.currentIndex() == 1 and box.value() == pytest.approx(1.0)
+    # the selection bar
+    assert not bar.isVisible()
+    proj, _ = win.view.project_points(0)
+    win.edit_panel.grow_at(proj[len(proj) // 3])
+    assert win.edit_panel.regions and bar.isVisible()
+    assert "points selected" in bar.label.text()
+    n = len(win.doc.edits.edits) if hasattr(win.doc.edits, "edits") else None
+    bar.b_delete.click()
+    assert not win.edit_panel.regions and not bar.isVisible()
+    assert win.doc.edits.can_undo()
+    if n is not None:
+        assert len(win.doc.edits.edits) == n + 1
+    win.modes.setCurrentIndex(0)
+    assert not rail.buttons["brush"].isVisible()
+    win.doc.dirty = False
