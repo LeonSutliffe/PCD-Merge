@@ -123,19 +123,19 @@ def _all_plans_job(sources, edits, levels, above, thickness, settings, base, poi
     return out
 
 
-def _fit_job(sources, edits, settings, *, progress):
+def _fit_job(sources, edits, settings, levels=None, *, progress):
     from .fit import fit_model
-    from .points import gather
+    from .points import TooManyPoints, gather
 
-    site = gather(sources, edits, cell=settings.detail, per_source=True,
-                  progress=lambda m, f: progress(m, 0.4 * f))
-    if len(site) > settings.max_points:
+    try:
+        site = gather(sources, edits, cell=settings.detail, per_source=True,
+                      limit=settings.max_points, progress=lambda m, f: progress(m, 0.4 * f))
+    except TooManyPoints as e:
         raise ValueError(
-            f"That is {len(site):,} points at this detail, more than the "
-            f"{settings.max_points:,} the fitting can take. Choose a coarser detail, or split "
-            "the site into parts in Edit mode and fit one part at a time (only ticked parts "
-            "are used).")
-    elements, _faces = fit_model(site, settings,
+            f"That is over {e.limit:,} points at this detail, more than the fitting can "
+            "take. Choose a coarser detail, or split the site into parts in Edit mode and "
+            "fit one part at a time (only ticked parts are used).") from None
+    elements, _faces = fit_model(site, settings, levels=levels or None,
                                  progress=lambda m, f: progress(m, 0.4 + 0.6 * f))
     return elements
 
@@ -291,7 +291,15 @@ class ModelPanel(QWidget):
         self.cb_planes.setChecked(True)
         self.cb_cyl = QCheckBox("Columns and pipes")
         self.cb_cyl.setChecked(True)
+        self.cb_clutter = QCheckBox("Leave out shelves and furniture")
+        self.cb_clutter.setChecked(True)
+        self.cb_clutter.setToolTip(
+            "Only keep floors and ceilings at the building's levels, and walls that reach the "
+            "ceiling or stand a storey high, so shelving, cupboards and tables are not "
+            "modelled. A wall hidden lower down by shelving is carried down to the floor. "
+            "Uses the levels above, or finds them if there are none.")
         gl_.addWidget(self.cb_planes)
+        gl_.addWidget(self.cb_clutter)
         gl_.addWidget(self.cb_cyl)
         self.b_fit = QPushButton("Fit shapes")
         self.b_fit.setToolTip("Fit walls, floors, roofs, columns and pipes to the scan. "
@@ -429,7 +437,8 @@ class ModelPanel(QWidget):
         return {"cut_above": self.cut_above.value(), "thickness": self.thickness.value(),
                 "close_gaps": self.close_gaps.value(), "square": self.cb_square.isChecked(),
                 "detail": self.detail.currentIndex(), "wall_thickness": self.wall_thick.value(),
-                "slab_thickness": self.slab_thick.value()}
+                "slab_thickness": self.slab_thick.value(),
+                "skip_clutter": self.cb_clutter.isChecked()}
 
     def load_settings(self) -> None:
         s = self.model.settings
@@ -440,6 +449,7 @@ class ModelPanel(QWidget):
         self.detail.setCurrentIndex(int(s.get("detail", 1)))
         self.wall_thick.setValue(float(s.get("wall_thickness", 0.15)))
         self.slab_thick.setValue(float(s.get("slab_thickness", 0.20)))
+        self.cb_clutter.setChecked(bool(s.get("skip_clutter", True)))
 
     # ---------------------------------------------------------------- the project
 
@@ -709,13 +719,14 @@ class ModelPanel(QWidget):
         return FitSettings(detail=DETAILS[self.detail.currentIndex()][1],
                            wall_thickness=self.wall_thick.value(),
                            slab_thickness=self.slab_thick.value(),
-                           planes=self.cb_planes.isChecked(), cylinders=self.cb_cyl.isChecked())
+                           planes=self.cb_planes.isChecked(), cylinders=self.cb_cyl.isChecked(),
+                           skip_clutter=self.cb_clutter.isChecked())
 
     def fit(self) -> None:
         if not self._ready():
             return
         self.win.tasks.run(_fit_job, (self.sources(), self.doc.edit_snapshot(),
-                                      self.fit_settings()),
+                                      self.fit_settings(), list(self.model.levels)),
                            self._fitted, "Fitting shapes…")
 
     def _fitted(self, elements) -> None:

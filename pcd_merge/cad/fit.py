@@ -13,7 +13,14 @@ roofs; round things become columns and pipes.
    either side) give the wall's real thickness; a ceiling with a floor just
    above it gives the slab's. A face seen from one side only gets a set
    thickness behind it.
-4. What is left over is searched for cylinders: points whose normals all
+4. With *leave out furniture* (on by default), faces that are not part of
+   the building are dropped: level faces away from any floor or ceiling
+   height (shelves, tables), and upright faces that neither reach the
+   ceiling nor stand nearly a storey high (shelving ends and backs,
+   cupboards). A wall that reaches the ceiling but was hidden lower down
+   by something standing in front of it is carried down to the floor, and
+   a floor hidden under shelving is stretched to the ceiling above it.
+5. What is left over is searched for cylinders: points whose normals all
    lie across one direction (the axis) and which sit on a circle around it.
 """
 
@@ -41,6 +48,7 @@ class FitSettings:
     cylinders: bool = True
     square_degrees: float = 3.0
     max_points: int = 6_000_000
+    skip_clutter: bool = True  # leave out shelves, furniture and other things in the rooms
 
     @property
     def tolerance(self) -> float:
@@ -95,21 +103,40 @@ def _near(faces, reach):
 
 
 def surface_normals(xyz: np.ndarray, sensors: np.ndarray | None, detail: float,
-                    groups: np.ndarray | None = None):
+                    groups: np.ndarray | None = None, progress=None):
     """Per point: unit normal (towards its scanner where known), how far the
     neighbours are off a plane (m), and whether the normal was oriented.
 
     With ``groups`` (the scan of each point) neighbours are only taken from
     the same scan, so the two faces of a thin wall, seen from the rooms on
     either side, don't blur into one."""
+    report = progress or (lambda _m, _f: None)
     if groups is None or len(np.unique(groups)) <= 1:
-        cov = local_covariances(xyz, 2.5 * detail, 30)
+        cov = local_covariances(xyz, 2.5 * detail, 30,
+                                progress=lambda f: report("Finding surfaces", 0.7 * f))
     else:
         cov = np.empty((len(xyz), 3, 3))
-        for g in np.unique(groups):
-            sel = np.nonzero(groups == g)[0]
-            cov[sel] = local_covariances(xyz[sel], 2.5 * detail, 30)
-    w, vecs = np.linalg.eigh(cov)
+        order = np.argsort(groups, kind="stable")
+        gs, starts = np.unique(groups[order], return_index=True)
+        ends = np.r_[starts[1:], len(order)]
+        done = 0
+        for a, b in zip(starts, ends):
+            sel = order[a:b]
+            base = done / len(xyz)
+            share = len(sel) / len(xyz)
+            cov[sel] = local_covariances(
+                xyz[sel], 2.5 * detail, 30,
+                progress=lambda f, base=base, share=share: report("Finding surfaces",
+                                                                  0.7 * (base + share * f)))
+            done += len(sel)
+            report("Finding surfaces", 0.7 * done / len(xyz))
+    w = np.empty((len(xyz), 3))
+    vecs = np.empty((len(xyz), 3, 3))
+    step = 1_000_000
+    for a in range(0, len(xyz), step):  # in slices, so the bar moves and Cancel works
+        w[a:a + step], vecs[a:a + step] = np.linalg.eigh(cov[a:a + step])
+        report("Finding surfaces", 0.7 + 0.3 * min(a + step, len(xyz)) / len(xyz))
+    del cov
     n = vecs[:, :, 0]
     off = np.sqrt(np.maximum(w[:, 0], 0))
     flat = (w[:, 1] > 0) & (w[:, 0] < 0.1 * w[:, 1])
@@ -125,8 +152,9 @@ def surface_normals(xyz: np.ndarray, sensors: np.ndarray | None, detail: float,
     return n, off, flat, oriented
 
 
-def grow_patches(xyz, normals, off, flat, oriented, detail, tol, degrees=10.0):
+def grow_patches(xyz, normals, off, flat, oriented, detail, tol, degrees=10.0, progress=None):
     """Labels of flat patches (-1: not on a flat surface)."""
+    report = progress or (lambda _f: None)
     good = flat & (off < tol)
     idx = np.nonzero(good)[0]
     labels = np.full(len(xyz), -1, dtype=np.int64)
@@ -134,13 +162,16 @@ def grow_patches(xyz, normals, off, flat, oriented, detail, tol, degrees=10.0):
         return labels
     p, n = xyz[idx], normals[idx]
     a, b = grid_pairs(grid_keys(p, detail), 1)
+    report(0.4)
     dot = np.einsum("ij,ij->i", n[a], n[b])
     both = oriented[idx][a] & oriented[idx][b]
     dot = np.where(both, dot, np.abs(dot))
     ok = dot > math.cos(math.radians(degrees))
     ok &= np.abs(np.einsum("ij,ij->i", p[b] - p[a], n[a])) < tol
     ok &= np.abs(np.einsum("ij,ij->i", p[b] - p[a], n[b])) < tol
+    report(0.6)
     labels[idx] = components(len(idx), a[ok], b[ok])
+    report(1.0)
     return labels
 
 
@@ -169,7 +200,7 @@ def _plane(pts: np.ndarray, normal_hint: np.ndarray):
     return c, n
 
 
-def make_faces(xyz, normals, labels, s: FitSettings) -> list[Face]:
+def make_faces(xyz, normals, labels, s: FitSettings, levels=None) -> list[Face]:
     tol = s.tolerance
     cell_area = s.detail * s.detail
     faces = []
@@ -224,7 +255,111 @@ def make_faces(xyz, normals, labels, s: FitSettings) -> list[Face]:
         ur = (float(np.percentile(a, 0.5)), float(np.percentile(a, 99.5)))
         vr = (float(np.percentile(b, 0.5)), float(np.percentile(b, 99.5)))
         out.append(Face(kind, n, c, u, v, ur, vr, len(pts), rms))
-    return snap_edges(merge_faces(out, s))
+    out = merge_faces(out, s)
+    if s.skip_clutter and levels:
+        out = merge_faces(building_faces(out, levels, s, xyz), s)
+    return snap_edges(out)
+
+
+# ---------------------------------------------------------------- furniture and shelving
+
+NEAR_LEVEL = 0.15  # a level face this close to a floor or ceiling height is on it (m)
+REACHES = 0.35  # a wall whose top is this close to the ceiling reaches it (m)
+TALL = 0.85  # ... or that stands this share of the storey's height
+SHORTEST_PIPE = 1.0  # shorter pipes are left out with the furniture (m)
+
+
+def _storeys(levels):
+    """(floor, top) per level, lowest first: top is the ceiling, or the next
+    floor, or None for the top level without a ceiling."""
+    lv = sorted(levels, key=lambda v: v.floor)
+    out = []
+    for k, v in enumerate(lv):
+        top = v.ceiling
+        if top is None and k + 1 < len(lv):
+            top = lv[k + 1].floor
+        out.append((v.floor, top))
+    return out
+
+
+def _storey_of(lo: float, hi: float, storeys):
+    """The storey a face from height ``lo`` to ``hi`` lies in the most."""
+    best, k_best = -1.0, None
+    for k, (f, t) in enumerate(storeys):
+        top = t if t is not None else max(hi, f + 3.0)
+        ov = min(hi, top) - max(lo, f)
+        if ov > best:
+            best, k_best = ov, k
+    return k_best
+
+
+def _hidden_below(f: Face, bottom: float, xyz: np.ndarray) -> bool:
+    """Whether the part of wall ``f`` below its points (down to ``bottom``)
+    was hidden by something in front of it, rather than open (a doorway or
+    an opening with a lintel, seen through)."""
+    z0 = f.corner(0, f.v_range[0])[2]
+    rel = xyz - f.centre
+    a = rel @ f.u
+    d = rel @ f.normal  # > 0: in front, on the scanner's side
+    m = (a >= f.u_range[0]) & (a <= f.u_range[1]) & (xyz[:, 2] >= bottom + 0.05) \
+        & (xyz[:, 2] <= z0 - 0.05)
+    front = np.count_nonzero(m & (d > 0.05) & (d < 6.0))
+    behind = np.count_nonzero(m & (d < -0.05) & (d > -4.0))
+    return front > max(20, behind)
+
+
+def building_faces(faces: list[Face], levels, s: FitSettings, xyz=None) -> list[Face]:
+    """The faces that belong to the building itself (see step 4 at the top)."""
+    storeys = _storeys(levels)
+    floors = [f for f, _t in storeys]
+    ceilings = [v.ceiling for v in levels if v.ceiling is not None]
+    near = max(NEAR_LEVEL, 3 * s.tolerance)
+    keep: list[Face] = []
+    for f in faces:
+        lo, hi = f.bounds()
+        if f.kind == "floor":
+            if any(abs(f.centre[2] - z) <= near for z in floors):
+                keep.append(f)
+        elif f.kind == "ceiling":
+            k = _storey_of(lo[2], hi[2], storeys)
+            fl, top = storeys[k]
+            if any(abs(f.centre[2] - z) <= near for z in ceilings) or \
+                    (top is None and f.centre[2] - fl >= 1.8):
+                keep.append(f)
+        elif f.kind == "wall":
+            k = _storey_of(lo[2], hi[2], storeys)
+            fl, top = storeys[k]
+            height = hi[2] - lo[2]
+            reaches = top is not None and hi[2] >= top - REACHES
+            tall = height >= (TALL * (top - fl) if top is not None else 2.0)
+            if not (reaches or tall):
+                continue  # shelving, cupboards, partitions part of the way up
+            if reaches and lo[2] > fl + 0.3 and xyz is not None and _hidden_below(f, fl, xyz):
+                dz = lo[2] - fl  # carry it down to the floor
+                f = Face(f.kind, f.normal, f.centre, f.u, f.v, f.u_range,
+                         (f.v_range[0] - dz, f.v_range[1]), f.points, f.rms)
+            keep.append(f)
+        else:  # sloping: a roof if big enough
+            if f.area >= max(4 * s.min_area, 1.5):
+                keep.append(f)
+    # a floor partly hidden under shelving: stretch it to the ceiling above it
+    ceil = [c for c in keep if c.kind == "ceiling"]
+    out = []
+    for f in keep:
+        if f.kind == "floor":
+            k = _storey_of(f.centre[2], f.centre[2] + 0.5, storeys)
+            top = storeys[k][1]
+            for c in ceil:
+                if top is None or abs(c.centre[2] - top) > near:
+                    continue
+                (a0, a1), (b0, b1) = _ranges_in(f, c)
+                inside = _overlap(f.u_range, (a0, a1)) * _overlap(f.v_range, (b0, b1))
+                if inside >= 0.5 * f.area and (a1 - a0) * (b1 - b0) <= 3 * f.area:
+                    f = Face(f.kind, f.normal, f.centre, f.u, f.v,
+                             (min(f.u_range[0], a0), max(f.u_range[1], a1)),
+                             (min(f.v_range[0], b0), max(f.v_range[1], b1)), f.points, f.rms)
+        out.append(f)
+    return out
 
 
 def snap_edges(faces: list[Face], reach: float = 0.3) -> list[Face]:
@@ -547,25 +682,34 @@ def _cylinder_along(pts, axis, tol, smallest, largest, sensors):
 # ---------------------------------------------------------------- the whole job
 
 
-def fit_model(site, s: FitSettings | None = None, progress=None):
+def fit_model(site, s: FitSettings | None = None, progress=None, levels=None):
     """Elements fitted to ``site`` (:class:`~pcd_merge.cad.points.SitePoints`,
-    already thinned to ``s.detail``). Returns (elements, faces)."""
+    already thinned to ``s.detail``). Returns (elements, faces).
+
+    ``levels`` (the building's floors and ceilings) tell the building from
+    the furniture; they are looked for in ``site`` when not given."""
     s = s or FitSettings()
     xyz = site.xyz
     if len(xyz) < 50:
         return [], []
-    if progress:
-        progress("Finding surfaces", 0.05)
+    report = progress or (lambda _m, _f: None)
+    report("Finding surfaces", 0.02)
     sensors = site.sensor_xyz()
-    normals, off, flat, oriented = surface_normals(xyz, sensors, s.detail, site.scan)
-    if progress:
-        progress("Growing flat patches", 0.35)
-    labels = grow_patches(xyz, normals, off, flat, oriented, s.detail, s.tolerance)
+    if s.skip_clutter and not levels:
+        from .levels import find_levels
+
+        report("Looking for floors and ceilings", 0.02)
+        levels = find_levels(xyz, site.sensor_z())
+    normals, off, flat, oriented = surface_normals(
+        xyz, sensors, s.detail, site.scan,
+        progress=lambda m, f: report(m, 0.05 + 0.4 * f))
+    report("Growing flat patches", 0.45)
+    labels = grow_patches(xyz, normals, off, flat, oriented, s.detail, s.tolerance,
+                          progress=lambda f: report("Growing flat patches", 0.45 + 0.25 * f))
     elements: list[Element] = []
     faces: list[Face] = []
-    if progress:
-        progress("Fitting planes", 0.55)
-    faces = make_faces(xyz, normals, labels, s)
+    report("Fitting planes", 0.7)
+    faces = make_faces(xyz, normals, labels, s, levels)
     # points of patches too small to keep are left for the cylinder search
     ids, counts = np.unique(labels[labels >= 0], return_counts=True)
     small = ids[counts * s.detail * s.detail < s.min_area]
@@ -575,9 +719,10 @@ def fit_model(site, s: FitSettings | None = None, progress=None):
         elements += slabs_from_faces(faces, s)
         elements += roofs_from_faces(faces, s)
     if s.cylinders:
-        if progress:
-            progress("Looking for columns and pipes", 0.8)
-        elements += find_cylinders(xyz, normals, labels, s, sensors)
-    if progress:
-        progress("Fitted", 1.0)
+        report("Looking for columns and pipes", 0.85)
+        found = find_cylinders(xyz, normals, labels, s, sensors)
+        if s.skip_clutter:  # the edges of shelf boards look like short thin pipes
+            found = [e for e in found if e.kind != "pipe" or e.size[2] >= SHORTEST_PIPE]
+        elements += found
+    report("Fitted", 1.0)
     return elements, faces

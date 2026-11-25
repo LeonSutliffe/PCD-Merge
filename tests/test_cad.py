@@ -201,6 +201,115 @@ def test_gather_applies_transform_slice_cell_and_edits():
     assert sorted(got.xyz[:, 0].tolist()) == [10.0, 11.0]
 
 
+def _thin_reference(pts, cell, ref):
+    """One point per cube, the first one read: the slow obvious way."""
+    seen, out = set(), []
+    for q in pts:
+        k = tuple(np.floor((q - ref) / cell).astype(int))
+        if k not in seen:
+            seen.add(k)
+            out.append(q)
+    return np.array(out)
+
+
+def test_gather_thins_across_chunks_like_one_pass():
+
+    rng = np.random.default_rng(3)
+    a = rng.random((30_000, 3)) * 2
+    b = rng.random((20_000, 3)) * 2 + 0.5
+    srcs = [Source(ArraySource(a, chunk=997), np.eye(4), None, None, "a"),
+            Source(ArraySource(b, chunk=1500), np.eye(4), None, None, "b")]
+    ref = np.floor(a[0])
+    # one cube count across both scans
+    got = gather(srcs, cell=0.1)
+    want = _thin_reference(np.concatenate([a, b]), 0.1, ref)
+    assert len(got) == len(want)
+    assert np.allclose(np.sort(got.xyz, axis=0), np.sort(want, axis=0))
+    # each scan on its own
+    got = gather(srcs, cell=0.1, per_source=True)
+    wa, wb = _thin_reference(a, 0.1, ref), _thin_reference(b, 0.1, ref)
+    assert (got.scan == 0).sum() == len(wa) and (got.scan == 1).sum() == len(wb)
+    assert np.allclose(np.sort(got.xyz[got.scan == 0], axis=0), np.sort(wa, axis=0))
+    assert np.allclose(np.sort(got.xyz[got.scan == 1], axis=0), np.sort(wb, axis=0))
+
+
+def test_gather_reports_progress_within_a_scan_and_can_stop():
+    pts = np.random.default_rng(0).random((10_000, 3))
+    src = Source(ArraySource(pts, chunk=1000), np.eye(4), None, None, "one big scan")
+    seen = []
+    gather([src], cell=0.05, progress=lambda m, f: seen.append(f))
+    assert seen == sorted(seen) and seen[-1] == 1.0
+    assert len({round(f, 2) for f in seen}) >= 10  # moves with every chunk, not 0 then 100 %
+
+    class Stop(Exception):
+        pass
+
+    calls = []
+
+    def stop(m, f):
+        calls.append(f)
+        if f >= 0.3:
+            raise Stop()
+
+    with pytest.raises(Stop):
+        gather([src], cell=0.05, progress=stop)
+    assert max(calls) < 0.5  # stopped part of the way through
+
+
+def test_gather_stops_early_when_over_the_limit():
+    from pcd_merge.cad.points import TooManyPoints
+
+    pts = np.random.default_rng(0).random((50_000, 3)) * 10
+    src = Source(ArraySource(pts, chunk=1000), np.eye(4), None, None, "a")
+    seen = []
+    with pytest.raises(TooManyPoints):
+        gather([src], cell=0.01, limit=5_000, progress=lambda m, f: seen.append(f))
+    assert max(seen) < 0.5  # without reading the whole scan
+
+
+def test_covariances_in_slabs_match_one_pass(monkeypatch):
+    import pcd_merge.cad.geom as G
+
+    pts = np.random.default_rng(2).random((20_000, 3)) * [10, 2, 2]
+    whole = G.local_covariances(pts, 0.2, 30)
+    monkeypatch.setattr(G, "TILE_POINTS", 3_000)
+    seen = []
+    tiled = G.local_covariances(pts, 0.2, 30, progress=seen.append)
+    assert len(seen) == 7 and seen[-1] == 1.0
+    assert np.allclose(tiled, whole, atol=1e-9)
+
+
+@pytest.fixture(scope="module")
+def shelving():
+    b = syn.make_building(density=1200, seed=1, shelving=True)
+    srcs = [Source(ArraySource(p), np.eye(4), None, s, f"s{i}") for i, (p, s) in enumerate(b)]
+    return gather(srcs, cell=0.05, per_source=True)
+
+
+def test_fit_leaves_out_shelving(shelving):
+    els, _faces = fit_model(shelving, FitSettings())
+    walls = [e for e in els if e.kind == "wall"]
+    slabs = [e for e in els if e.kind == "slab"]
+    # the same building as without shelving: 7 walls a storey, 4 slabs/floors/ceilings
+    assert len(walls) == 14
+    for w in walls:
+        assert w.size[2] == pytest.approx(2.7, abs=0.03)  # floor to ceiling, even behind shelves
+        assert w.bottom() == pytest.approx(0.0, abs=0.03) or \
+            w.bottom() == pytest.approx(3.0, abs=0.03)
+    assert len(slabs) == 6
+    for e in slabs:  # no shelf boards among the floors
+        assert min(abs(e.bottom() - z) for z in (-0.2, 2.7, 5.7)) < 0.03
+    # the floor hidden under the shelves reaches the walls of the room
+    left = [e for e in slabs if e.name == "Floor (top seen)" and e.origin[0] < 1]
+    assert len(left) == 1 and left[0].size[1] == pytest.approx(7.4, abs=0.15)
+
+
+def test_fit_keeps_shelving_when_asked(shelving):
+    els, _faces = fit_model(shelving, FitSettings(skip_clutter=False))
+    walls = [e for e in els if e.kind == "wall"]
+    assert len(walls) > 14  # the shelving's backs and ends
+
+
 # ---------------------------------------------------------------- files
 
 
