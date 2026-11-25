@@ -41,6 +41,7 @@ class View3D(QWidget):
     measure_toggled = Signal(bool)  # the Measure button
     tool_changed = Signal()
     panels_toggled = Signal(bool)  # the Hide panels button: hide the side panels
+    walk_changed = Signal(bool)  # the walk-through started (True) or ended
 
     NAV_HINT = "Left-drag: rotate   Right/middle-drag: pan   Wheel: zoom"
 
@@ -76,25 +77,39 @@ class View3D(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # ---- tool bar
+        # ---- the view strip: one slim row above the view (the tools are on
+        # the view itself, see tool_rail.py)
         self.toolbar = QWidget()
-        rows = QVBoxLayout(self.toolbar)
-        rows.setContentsMargins(4, 4, 4, 2)
-        rows.setSpacing(2)
-        top = QHBoxLayout()
-        rows.addLayout(top)
-        self.rb_orig = QRadioButton("Original positions")
+        self.toolbar.setObjectName("viewstrip")
+        self.toolbar.setAttribute(Qt.WA_StyledBackground, True)
+        top = QHBoxLayout(self.toolbar)
+        top.setContentsMargins(8, 5, 8, 5)
+        top.setSpacing(6)
+        self.camera = QComboBox()
+        self.camera.addItems(list(CAMERAS))
+        self.camera.setToolTip("Orbit freely, or look straight down (Top), from the front "
+                               "or from the side.")
+        self.camera.activated.connect(self._camera_preset)
+        top.addWidget(self.camera)
+        self.cb_ortho = QCheckBox("Flat")
+        self.cb_ortho.setToolTip("Orthographic: no perspective, so sizes are the same near "
+                                 "and far, like a plan or an elevation.")
+        self.cb_ortho.toggled.connect(self._set_ortho)
+        top.addWidget(self.cb_ortho)
+        top.addWidget(_divider())
+        self.rb_orig = QRadioButton("Original")
+        self.rb_orig.setToolTip("Show the scans where they were scanned.")
         self.rb_aligned = QRadioButton("Aligned")
+        self.rb_aligned.setToolTip("Show the scans moved into line with each other.")
         grp = QButtonGroup(self)
         grp.addButton(self.rb_orig)
         grp.addButton(self.rb_aligned)
         self.rb_orig.setChecked(True)
         self.rb_orig.toggled.connect(self.redraw)
-        top.addWidget(QLabel("Show:"))
         top.addWidget(self.rb_orig)
         top.addWidget(self.rb_aligned)
-        top.addSpacing(12)
-        top.addWidget(QLabel("Colour:"))
+        top.addWidget(_divider())
+        top.addWidget(QLabel("Colour"))
         self.colour_mode = QComboBox()
         self.colour_mode.addItems(["Per scan", "Alignment error", "Height", "Intensity",
                                    "RGB colour"])
@@ -106,29 +121,15 @@ class View3D(QWidget):
             "RGB colour uses the scans' own colours, where they have them.")
         self.colour_mode.currentIndexChanged.connect(self.redraw)
         top.addWidget(self.colour_mode)
-        top.addStretch(1)
-        top = QHBoxLayout()
-        rows.addLayout(top)
-        top.addWidget(QLabel("View:"))
-        self.camera = QComboBox()
-        self.camera.addItems(list(CAMERAS))
-        self.camera.setToolTip("Orbit freely, or look straight down (Top), from the front "
-                               "or from the side.")
-        self.camera.activated.connect(self._camera_preset)
-        top.addWidget(self.camera)
-        self.cb_ortho = QCheckBox("Orthographic")
-        self.cb_ortho.setToolTip("No perspective: sizes are the same near and far, "
-                                 "like a plan or an elevation.")
-        self.cb_ortho.toggled.connect(self._set_ortho)
-        top.addWidget(self.cb_ortho)
-        top.addStretch(1)
-        top.addWidget(QLabel("Point size:"))
+        top.addWidget(QLabel("Size"))
         self.pt_size = QSlider(Qt.Horizontal)
         self.pt_size.setRange(1, 8)
         self.pt_size.setValue(2)
-        self.pt_size.setFixedWidth(70)
+        self.pt_size.setFixedWidth(60)
+        self.pt_size.setToolTip("Point size")
         self.pt_size.valueChanged.connect(self.redraw)
         top.addWidget(self.pt_size)
+        top.addStretch(1)
         self.b_measure = QPushButton("Measure")
         self.b_measure.setCheckable(True)
         self.b_measure.setToolTip(
@@ -138,7 +139,8 @@ class View3D(QWidget):
             "in the walk-through too (again to turn it off).")
         self.b_measure.toggled.connect(self.measure_toggled)
         top.addWidget(self.b_measure)
-        b_fit = QPushButton("Reset view")
+        b_fit = QPushButton("Fit")
+        b_fit.setToolTip("Reset the view so the whole site fits (Home).")
         b_fit.clicked.connect(self.fit)
         top.addWidget(b_fit)
         self.b_walk = QPushButton("Walk through")
@@ -159,7 +161,7 @@ class View3D(QWidget):
         self.stack = QStackedWidget()
         if HAVE_GL:
             self.view = gl.GLViewWidget()
-            self.view.setBackgroundColor((25, 25, 30))
+            self.view.setBackgroundColor((16, 18, 22))
             self.view.setMouseTracking(True)
             self.overlay = _Overlay(self)
             self._filter = _ToolFilter(self)
@@ -718,6 +720,7 @@ class View3D(QWidget):
         self.toolbar.hide()
         self.bottom.hide()
         self.set_panels_hidden(self.panels_hidden)
+        self.walk_changed.emit(True)
 
     def _walk_in_window(self, scene, title, error: str):
         """Fallback: the walk-through in a window of its own (as before 0.9)."""
@@ -743,6 +746,7 @@ class View3D(QWidget):
         w.deleteLater()
         self.toolbar.show()
         self.bottom.show()
+        self.walk_changed.emit(False)
         if self._redraw_pending:
             self._redraw_pending = False
             self.redraw()
@@ -762,6 +766,13 @@ class View3D(QWidget):
         """The kept walk-through is out of date: leave it and forget it."""
         self.leave_walk()
         self._walk_resume = None
+
+
+def _divider() -> QWidget:
+    line = QWidget()
+    line.setFixedSize(1, 18)
+    line.setStyleSheet("background: #323744;")
+    return line
 
 
 class _Overlay(QWidget):

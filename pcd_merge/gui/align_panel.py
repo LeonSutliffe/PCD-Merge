@@ -14,7 +14,7 @@ import random
 
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QKeySequence
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
@@ -28,6 +28,7 @@ from ..readers import input_filter
 from ..registration import AlignSettings, align
 from .common import GRADE_COLOURS, HINT_STYLE
 from .save_dialog import ask_save_path
+from .steps import Fold, PairList, StepCard
 from .workers import QuietWorker
 
 
@@ -133,29 +134,82 @@ class AlignPanel(QWidget):
         scroll.setWidget(body)
         lv = QVBoxLayout(body)
 
-        # ---- alignment
-        box = QGroupBox("Alignment")
-        form = QFormLayout(box)
+        # The panel is four numbered steps: Add scans, Align, Check the fit,
+        # Merge. The step to do next is highlighted; options most people
+        # never change are folded away under "More options".
+
+        # ---- 1 add scans
+        self.step_add = StepCard(1, "Add scans")
+        lv.addWidget(self.step_add)
+        row = QHBoxLayout()
+        self.b_add = QPushButton("Add scans…")
+        self.b_add.setToolTip("Pick scan files (PCD, PLY, LAS, LAZ, E57). Dropping files or "
+                              "folders on the window works too.")
+        self.b_add.clicked.connect(lambda: self.win._add_dialog())
+        row.addWidget(self.b_add)
+        self.b_base = QPushButton("Add to a merged cloud…")
+        self.b_base.setToolTip(
+            "Pick a merged cloud you saved earlier. It stays exactly where it is and the "
+            "other scans in the project are aligned to it and appended when you merge.")
+        self.b_base.clicked.connect(self._base_dialog)
+        row.addWidget(self.b_base)
+        self.step_add.body.addLayout(row)
+
+        # ---- 2 align
+        self.step_align = StepCard(2, "Align")
+        lv.addWidget(self.step_align)
+        self.b_align = QPushButton("Align")
+        self.b_align.setProperty("primary", True)
+        self.b_align.setToolTip("Find how the scans fit together. The scans are never changed; "
+                                "the result is kept in the project.")
+        self.b_align.clicked.connect(lambda: self.start_align(new_seed=False))
+        self.step_align.body.addWidget(self.b_align)
+        opts = Fold("Options")
+        form = QFormLayout()
         self.voxel = _spin(3, 100.0, 0.05, "Automatic",
                            "Grid size used to thin the scans for alignment only (same units as "
                            "the scans, usually metres). Larger is faster and more robust, smaller "
                            "is more precise. Merging always uses every original point.")
         self.voxel.valueChanged.connect(lambda v: self.doc.set_setting("voxel", v or None))
-        form.addRow("Voxel size:", self.voxel)
-        lv.addWidget(box)
+        form.addRow("Detail (voxel size):", self.voxel)
+        opts.body.addLayout(form)
+        self.step_align.body.addWidget(opts)
 
-        self.b_align = QPushButton("Align")
-        self.b_align.setStyleSheet("font-weight: bold; padding: 8px;")
-        self.b_align.clicked.connect(lambda: self.start_align(new_seed=False))
-        lv.addWidget(self.b_align)
-
+        # ---- 3 check the fit
+        self.step_check = StepCard(3, "Check the fit")
+        lv.addWidget(self.step_check)
+        cv = self.step_check.body
         self.grade_label = QLabel()
         self.grade_label.setToolTip(
             "Good: the scans agree closely where they overlap. Fair: usable, but check the "
             "heat map for red areas. Poor: likely misaligned or barely overlapping.")
         self.grade_label.hide()
-        lv.addWidget(self.grade_label)
+        cv.addWidget(self.grade_label)
+        self.pairs = PairList()
+        cv.addWidget(self.pairs)
+        row = QHBoxLayout()
+        self.b_retry = QPushButton("Retry")
+        self.b_retry.setToolTip(
+            "Try again with a coarser voxel size and more search attempts, which helps with "
+            "repetitive or low-detail scenes. Each press goes coarser (1.5×, 2×, 3× the first "
+            "try). The best result so far is kept.")
+        self.b_retry.clicked.connect(self.retry)
+        self.b_by_hand = QPushButton("Fix by hand")
+        self.b_by_hand.setCheckable(True)
+        self.b_by_hand.setToolTip("Line a scan up yourself by clicking the same spots on it "
+                                  "and on a scan that is already right.")
+        row.addWidget(self.b_retry)
+        row.addWidget(self.b_by_hand)
+        cv.addLayout(row)
 
+        from .manual_align import ManualAlignBox
+
+        self.manual = ManualAlignBox(self)
+        self.manual.hide()
+        self.b_by_hand.toggled.connect(self.manual.setVisible)
+        cv.addWidget(self.manual)
+
+        rep = Fold("Full report")
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
         self.report.setPlaceholderText("Alignment results will appear here.")
@@ -164,33 +218,12 @@ class AlignPanel(QWidget):
         font.setFamily("Consolas")
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.report.setFont(font)
-        lv.addWidget(self.report)
-
-        row = QHBoxLayout()
-        self.b_retry = QPushButton("Retry")
-        self.b_retry.setToolTip(
-            "Try again with a coarser voxel size and more search attempts, which helps with "
-            "repetitive or low-detail scenes. Each press goes coarser (1.5×, 2×, 3× the first "
-            "try). The best result so far is kept.")
-        self.b_retry.clicked.connect(self.retry)
+        rep.body.addWidget(self.report)
         self.b_save_tf = QPushButton("Save transforms…")
         self.b_save_tf.setToolTip("Write the 4x4 matrices and the quality report as JSON.")
         self.b_save_tf.clicked.connect(self.save_transforms)
-        row.addWidget(self.b_retry)
-        row.addWidget(self.b_save_tf)
-        lv.addLayout(row)
-
-        self.b_base = QPushButton("Add to an existing merged cloud…")
-        self.b_base.setToolTip(
-            "Pick a merged cloud you saved earlier. It stays exactly where it is and the "
-            "other scans in the project are aligned to it and appended when you merge.")
-        self.b_base.clicked.connect(self._base_dialog)
-        lv.addWidget(self.b_base)
-
-        from .manual_align import ManualAlignBox
-
-        self.manual = ManualAlignBox(self)
-        lv.addWidget(self.manual)
+        rep.body.addWidget(self.b_save_tf)
+        cv.addWidget(rep)
 
         # ---- clean-up: built here (the merge uses it) but shown in Edit mode
         box = self.cleanup_box = QGroupBox("Automatic clean-up (applied when saving)")
@@ -252,32 +285,37 @@ class AlignPanel(QWidget):
             cb.toggled.connect(self.cleanup_changed)
         self.dedup_cell.valueChanged.connect(self.cleanup_changed)
 
-        # ---- export
-        box = QGroupBox("Merge and export")
-        ev = QVBoxLayout(box)
-        self.cb_source = QCheckBox("Add a 'source' field (scan of each point)")
-        self.cb_compress = QCheckBox("Compress PCD output")
-        self.cb_compress.setToolTip("Needs the whole merged cloud in memory; leave off for "
-                                    "very large sites.")
-        ev.addWidget(self.cb_source)
-        ev.addWidget(self.cb_compress)
+        # ---- 4 merge
+        self.step_merge = StepCard(4, "Merge")
+        lv.addWidget(self.step_merge)
+        ev = self.step_merge.body
         self.spacing = _spin(3, 10.0, 0.01, "Full resolution",
                              "Thin the merged cloud so no two points are closer than this "
                              "distance (in the scans' units, e.g. 0.02 = 2 cm). Original points "
                              "are kept, not averaged, so intensity and other fields stay exact. "
                              "Leave at Full resolution to save every point.")
         f2 = QFormLayout()
-        f2.addRow("Min. point spacing:", self.spacing)
+        f2.addRow("Point spacing:", self.spacing)
         ev.addLayout(f2)
+        more = Fold("More options")
+        self.cb_source = QCheckBox("Add a 'source' field (scan of each point)")
+        self.cb_compress = QCheckBox("Compress PCD output")
+        self.cb_compress.setToolTip("Needs the whole merged cloud in memory; leave off for "
+                                    "very large sites.")
+        more.body.addWidget(self.cb_source)
+        more.body.addWidget(self.cb_compress)
+        ev.addWidget(more)
         self.cleanup_summary = QLabel()
         self.cleanup_summary.setWordWrap(True)
         self.cleanup_summary.setStyleSheet(HINT_STYLE)
         ev.addWidget(self.cleanup_summary)
         self.b_merge = QPushButton("Accept and merge…")
-        self.b_merge.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.b_merge.setProperty("primary", True)
+        self.b_merge.setToolTip("Save every scan, aligned, as one cloud, from the full-"
+                                "resolution points (Ctrl+Enter).")
+        self.b_merge.setShortcut(QKeySequence("Ctrl+Return"))
         self.b_merge.clicked.connect(self.merge)
         ev.addWidget(self.b_merge)
-        lv.addWidget(box)
         lv.addStretch(1)
 
         for w in (self.cb_dedup, self.cb_denoise, self.cb_moving, self.cb_source,
@@ -332,7 +370,26 @@ class AlignPanel(QWidget):
         self.b_merge.setEnabled(not busy and aligned)
         self.b_save_tf.setEnabled(not busy and aligned)
         self.b_base.setEnabled(not busy)
+        self.b_add.setEnabled(not busy)
         self.manual.update_buttons(busy)
+        self._update_steps()
+
+    def _update_steps(self):
+        """Tick the steps that are done and highlight the one to do next."""
+        n = len(self.doc.scans)
+        aligned = self.doc.result is not None
+        merged = bool(self.doc.project.exports)
+        self.step_add.set_state("done" if n >= 2 else "current",
+                                f"{n} scan{'s' if n != 1 else ''}" if n else "")
+        self.step_align.set_state("done" if aligned else ("current" if n >= 2 else "todo"))
+        self.step_check.set_state("current" if aligned else "todo")
+        self.step_merge.set_state("done" if merged and aligned else
+                                  ("ready" if aligned else "todo"))
+        # the blue button is the next thing to press: Align until it is done
+        if self.b_align.property("primary") != (not aligned):
+            self.b_align.setProperty("primary", not aligned)
+            self.b_align.style().unpolish(self.b_align)
+            self.b_align.style().polish(self.b_align)
 
     def scans_changed(self):
         """Scans added or removed: earlier results no longer apply."""
@@ -355,6 +412,8 @@ class AlignPanel(QWidget):
         if self.doc.result is None:
             self.grade_label.hide()
             self.report.clear()
+            self.pairs.show_quality(None, [])
+            self._update_steps()
             return
         if q is not None:
             grade = q.grade
@@ -365,6 +424,9 @@ class AlignPanel(QWidget):
         else:
             self.grade_label.hide()
         self.report.setPlainText("\n".join(self.doc.report_lines))
+        self.pairs.show_quality(q, [s.entry.name or os.path.basename(s.entry.path)
+                                    for s in self.doc.scans])
+        self._update_steps()
 
     # ---------------------------------------------------------------- align
 

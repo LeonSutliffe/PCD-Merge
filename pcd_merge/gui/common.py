@@ -14,8 +14,8 @@ PALETTE = [
     (0.75, 0.40, 0.90), (0.20, 0.85, 0.80), (0.95, 0.55, 0.75), (0.65, 0.65, 0.65),
 ]
 EXPORT_COLOUR = (0.92, 0.92, 0.88)  # merged clouds in the view: off-white
-GRADE_COLOURS = {"Good": "#2e9e44", "Fair": "#d08a00", "Poor": "#d0342c"}
-HINT_STYLE = "color: #888;"
+GRADE_COLOURS = {"Good": "#3fcf7f", "Fair": "#f2b23e", "Poor": "#ff6b6b"}
+HINT_STYLE = "color: #8a92a2;"
 
 
 def cloud_colour(i: int) -> tuple[float, float, float]:
