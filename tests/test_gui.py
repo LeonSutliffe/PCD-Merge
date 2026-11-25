@@ -73,11 +73,21 @@ def test_align_save_reopen_and_merge(window, qtbot, scans, tmp_path, monkeypatch
     win.load_paths(scans)
     _wait(qtbot, win)
     assert len(win.doc.scans) == 2 and win.align_panel.b_align.isEnabled()
+    ap = win.align_panel
+    # the steps: scans added, Align is next
+    assert (ap.step_add.state, ap.step_align.state, ap.step_check.state,
+            ap.step_merge.state) == ("done", "current", "todo", "todo")
     win.align_panel.voxel.setValue(0.3)
     win.align_panel.start_align()
     _wait(qtbot, win)
     assert win.doc.result is not None and win.doc.quality is not None
     assert win.align_panel.grade_label.text().startswith("Alignment quality")
+    assert (ap.step_align.state, ap.step_check.state, ap.step_merge.state) == (
+        "done", "current", "ready")
+    assert ap.pairs.rows and not ap.b_align.property("primary")
+    assert not ap.manual.isVisibleTo(ap)
+    ap.b_by_hand.click()  # Fix by hand opens align-by-hand
+    assert ap.manual.isVisibleTo(ap)
 
     win.doc.save_as(str(tmp_path / "Site"))
     folder = win.doc.project.folder
