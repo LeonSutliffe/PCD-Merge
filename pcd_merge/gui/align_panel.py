@@ -62,7 +62,9 @@ def align_clouds(clouds, settings, previews, quality_ref=None, *, progress):
     progress("Measuring alignment quality", 0.92)
     # Reuse the downsampled clouds from alignment instead of the full ones.
     q_xyz, q_voxel = quality_ref or (result.fine or xyz, result.voxel_size)
-    quality = assess(q_xyz, result.transforms, q_voxel, preview_xyz=previews)
+    # Scanner positions, so the two faces of a wall aren't compared.
+    origins = [tuple(getattr(c, "viewpoint", (0, 0, 0)))[:3] for c in clouds]
+    quality = assess(q_xyz, result.transforms, q_voxel, preview_xyz=previews, origins=origins)
     return result, quality
 
 
